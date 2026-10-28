@@ -132,7 +132,7 @@
       <strong>刷课分线程进度</strong>
       <span class="bnu-hint" id="bnu-overall-progress"></span>
     </div>
-    <div class="bnu-worker-grid" id="bnu-workers"></div>
+    <div class="bnu-worker-grid" id="bnu-worker-cards"></div>
   </div>
 
   <div class="bnu-alert" id="bnu-msg" hidden></div>
@@ -875,7 +875,7 @@
 
   function renderWorkers(progress, plugin) {
     var panel = $("bnu-progress-panel");
-    var root = $("bnu-workers");
+    var root = $("bnu-worker-cards");
     if (plugin && plugin.running) {
       panel.hidden = false;
       if (!root.children.length) {
