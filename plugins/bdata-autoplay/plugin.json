@@ -1,0 +1,118 @@
+{
+  "id": "bdata-autoplay",
+  "name": "BNU刷课",
+  "version": "4.2.0",
+  "description": "使用全局北师大统一认证账号统一管理师道云与 SPOC 课程，支持课程详情缓存、章节筛选、混合并发刷课，以及师道云自动答题和评论回复。",
+  "entry": "plugin.py",
+  "config_ui": "ui.html",
+  "config_schema": [
+    {
+      "key": "course_plans",
+      "label": "课程与任务范围",
+      "type": "object",
+      "default": {}
+    },
+    {
+      "key": "auto_answer",
+      "label": "自动答题",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "key": "comment_reply",
+      "label": "评论回复",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "key": "full_auto",
+      "label": "全自动模式",
+      "type": "bool",
+      "default": false,
+      "hint": "跳过人工核验；每次启动前都会弹窗警告并要求确认"
+    },
+    {
+      "key": "only_unfinished",
+      "label": "只刷未完成视频",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "workers",
+      "label": "并发浏览器数",
+      "type": "number",
+      "default": 8,
+      "min": 1,
+      "step": 1,
+      "hint": "默认根据物理核心数和可用内存自动建议；获取课程详情使用 1.5 倍并发"
+    },
+    {
+      "key": "speedup",
+      "label": "播放倍速",
+      "type": "number",
+      "default": 3,
+      "min": 1,
+      "max": 3,
+      "step": 0.5,
+      "hint": "实测高于 3 倍时服务器记录不稳定"
+    },
+    {
+      "key": "completion_tolerance",
+      "label": "完成容差(秒)",
+      "type": "number",
+      "default": 3,
+      "min": 0,
+      "max": 30,
+      "step": 1,
+      "hint": "服务器记录时长距视频总时长不超过该秒数或 1% 时视为完成"
+    },
+    {
+      "key": "survey_strategy",
+      "label": "量表答题策略",
+      "type": "choice",
+      "default": "fixed",
+      "choices": ["fixed", "normal"],
+      "choice_labels": ["固定正负策略", "正态分布策略"]
+    },
+    {
+      "key": "survey_positive_value",
+      "label": "正向题固定选项",
+      "type": "choice",
+      "default": "3",
+      "choices": ["0", "1", "2", "3", "4"],
+      "choice_labels": ["非常不同意", "不同意", "一般", "同意", "非常同意"]
+    },
+    {
+      "key": "survey_negative_value",
+      "label": "负向题固定选项",
+      "type": "choice",
+      "default": "1",
+      "choices": ["0", "1", "2", "3", "4"],
+      "choice_labels": ["非常不同意", "不同意", "一般", "同意", "非常同意"]
+    },
+    {
+      "key": "headless",
+      "label": "无头模式",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "api_url",
+      "label": "模型 API 地址",
+      "type": "string",
+      "default": "https://api.deepseek.com"
+    },
+    {
+      "key": "api_key",
+      "label": "模型 API Key",
+      "type": "password",
+      "default": ""
+    },
+    {
+      "key": "model_id",
+      "label": "模型 ID",
+      "type": "string",
+      "default": "deepseek-flash"
+    }
+  ]
+}

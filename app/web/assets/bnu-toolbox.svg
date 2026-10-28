@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>BNU-ToolBox</title>
+  <defs>
+    <linearGradient id="bg" x1="86" y1="44" x2="432" y2="472" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1830"/>
+      <stop offset="0.58" stop-color="#123D78"/>
+      <stop offset="1" stop-color="#492A9E"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="177" y1="320" x2="338" y2="381" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#46B8FF"/>
+      <stop offset="1" stop-color="#7456FF"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0" cy="0" r="1" gradientTransform="translate(144 112) rotate(44) scale(286)">
+      <stop stop-color="#80CAFF" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#80CAFF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-25%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#020713" flood-opacity=".38"/>
+    </filter>
+    <clipPath id="toolbox">
+      <rect x="112" y="188" width="288" height="242" rx="35"/>
+    </clipPath>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#shine)"/>
+  <g transform="translate(0 -24)">
+    <path d="M191 190v-20c0-29 23-52 52-52h36c29 0 52 23 52 52v20"
+          fill="none" stroke="#B9D7FF" stroke-width="27" stroke-linecap="round"/>
+    <g filter="url(#shadow)">
+      <rect x="112" y="188" width="288" height="242" rx="35" fill="#F9FCFF"/>
+      <rect x="112" y="188" width="288" height="72" fill="#EAF3FF" clip-path="url(#toolbox)"/>
+      <path d="M156 260h200" stroke="#C8DAF5" stroke-width="7" stroke-linecap="round"/>
+    </g>
+    <text x="256" y="380"
+          fill="url(#mark)"
+          font-family="Segoe UI, Arial, sans-serif"
+          font-size="110"
+          font-weight="900"
+          text-anchor="middle">BNU</text>
+  </g>
+</svg>
