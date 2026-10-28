@@ -19,7 +19,7 @@ jobs:
 
       - name: Install Inno Setup
         shell: powershell
-        run: choco install innosetup --version=6.7.3 -y --no-progress
+        run: choco install innosetup -y --no-progress
 
       - name: Build installer
         shell: powershell
