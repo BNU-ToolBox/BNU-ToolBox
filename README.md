@@ -98,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 产物：
 
 ```text
-dist\installer\BNU-ToolBox-Setup-1.0.0.exe
+dist\installer\BNU-ToolBox-Setup-0.0.2.exe
 ```
 
 ## 项目结构
