@@ -1102,13 +1102,13 @@ def _crawl_bdata_parallel(
                         f"{course['name']}: {len(course['tasks'])} 个任务, "
                         f"{len(course['chapters'])} 个章节")
                     if report:
-                        report(f"已读取 {course['name']}")
+                        report("bdata", f"已读取 {course['name']}")
                 except (RuntimeError, WebDriverException) as exc:
                     with state_lock:
                         failures[cid] = str(exc)
                     ctx.log(f"课程任务缓存失败({course_name}): {exc}")
                     if report:
-                        report(f"读取失败 {course_name}")
+                        report("bdata", f"读取失败 {course_name}")
         except (RuntimeError, WebDriverException) as exc:
             ctx.log(f"师道云并行进程 #{worker_id} 初始化失败: {exc}")
         finally:
@@ -1180,7 +1180,7 @@ def _crawl_spoc_parallel(
                         results[url] = course
                         handled_indexes.add(card.index)
                     if report:
-                        report(f"已读取 {card.title}")
+                        report("spoc", f"已读取 {card.title}")
                 except (RuntimeError, WebDriverException) as exc:
                     key = str(card.index)
                     with state_lock:
@@ -1188,7 +1188,7 @@ def _crawl_spoc_parallel(
                         handled_indexes.add(card.index)
                     ctx.log(f"SPOC 课程缓存失败({card.title}): {exc}")
                     if report:
-                        report(f"读取失败 {card.title}")
+                        report("spoc", f"读取失败 {card.title}")
         except (RuntimeError, WebDriverException) as exc:
             ctx.log(f"SPOC 并行进程 #{worker_id} 初始化失败: {exc}")
         finally:
@@ -1237,6 +1237,8 @@ def refresh_all_caches_parallel(
     ctx: PluginContext,
     bdata_courses: list[dict],
     spoc_cards: list[spoc_platform.CourseCard],
+    bdata_ready: bool = True,
+    spoc_ready: bool = True,
 ) -> tuple[dict, dict[str, int]]:
     """Refresh both platforms concurrently and persist the merged cache once."""
     total_courses = len(bdata_courses) + len(spoc_cards)
@@ -1250,42 +1252,66 @@ def refresh_all_caches_parallel(
     cookies = load_cookies(ctx)
     progress_lock = threading.Lock()
     progress_done = 0
-    labels = ["登录平台", "获取课程详情", "保存课程缓存", "完成"]
+    platform_done = {"bdata": 0, "spoc": 0}
+    platform_total = {
+        "bdata": len(bdata_courses),
+        "spoc": len(spoc_cards),
+    }
+    platform_ready = {"bdata": bdata_ready, "spoc": spoc_ready}
+
+    def platform_status(platform: str) -> str:
+        if not platform_ready[platform]:
+            return "error"
+        total = platform_total[platform]
+        done = platform_done[platform]
+        if total == 0 or done >= total:
+            return "done"
+        return "active"
+
+    def publish(title: str = "") -> None:
+        steps = _cache_workflow_steps(
+            login="done",
+            course_list="done",
+            spoc=platform_status("spoc"),
+            bdata=platform_status("bdata"),
+        )
+        overall = (
+            round(progress_done / total_courses * 100, 1)
+            if total_courses else 0
+        )
+        ctx.progress(
+            stage="cache",
+            done=progress_done,
+            total=total_courses,
+            title=title,
+            steps=steps,
+            overall_percent=overall,
+        )
+
     ctx.progress(
         stage="cache",
         done=0,
         total=total_courses,
-        steps=_workflow_steps(
-            labels, active=("获取课程详情",), completed={"登录平台"}),
+        steps=_cache_workflow_steps(
+            login="done",
+            course_list="done",
+            spoc=platform_status("spoc"),
+            bdata=platform_status("bdata"),
+        ),
         overall_percent=0,
     )
 
-    def report(title: str) -> None:
+    def report(platform: str, title: str) -> None:
         nonlocal progress_done
         with progress_lock:
             progress_done += 1
             current = progress_done
-        completed = {"登录平台"}
-        if current >= total_courses:
-            completed.add("获取课程详情")
+            platform_done[platform] += 1
         ctx.status(
             f"正在获取课程详情 {current}/{total_courses}…",
             stage="cache",
         )
-        ctx.progress(
-            stage="cache", done=current, total=total_courses,
-            title=title,
-            steps=_workflow_steps(
-                labels,
-                active=(
-                    ("保存课程缓存",) if current >= total_courses
-                    else ("获取课程详情",)
-                ),
-                completed=completed,
-            ),
-            overall_percent=round(current / total_courses * 100, 1)
-            if total_courses else 100,
-        )
+        publish(title)
 
     with ThreadPoolExecutor(max_workers=2) as starters:
         bdata_future = starters.submit(
@@ -1327,12 +1353,23 @@ def refresh_all_caches_parallel(
         ]
     cache["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save_task_cache(ctx, cache)
+    final_spoc = "error" if spoc_failures or not spoc_ready else "done"
+    final_bdata = "error" if bdata_failures or not bdata_ready else "done"
     ctx.progress(
         stage="finish",
         done=total_courses,
         total=total_courses,
-        steps=_workflow_steps(labels, completed=set(labels)),
-        overall_percent=100,
+        steps=_cache_workflow_steps(
+            login="done",
+            course_list="done",
+            spoc=final_spoc,
+            bdata=final_bdata,
+        ),
+        overall_percent=(
+            100 if final_spoc != "error" and final_bdata != "error"
+            else round(progress_done / total_courses * 100, 1)
+            if total_courses else 0
+        ),
         eta_s=0,
     )
     return cache, {
@@ -2275,7 +2312,7 @@ def viewed(media_duration: float, watched: float) -> float:
 
 
 def _workflow_steps(
-        labels: list[str],
+        labels: list[str | dict],
         *,
         active: tuple[str, ...] = (),
         completed: set[str] | None = None,
@@ -2283,7 +2320,15 @@ def _workflow_steps(
     completed = completed or set()
     failed = failed or set()
     steps = []
-    for label in labels:
+    for item in labels:
+        if isinstance(item, dict):
+            label = str(item.get("label") or "未命名步骤")
+            metadata = {
+                key: value for key, value in item.items() if key != "label"
+            }
+        else:
+            label = str(item)
+            metadata = {}
         if label in failed:
             status = "error"
         elif label in completed:
@@ -2292,8 +2337,53 @@ def _workflow_steps(
             status = "active"
         else:
             status = "pending"
-        steps.append({"label": label, "status": status})
+        steps.append({**metadata, "label": label, "status": status})
     return steps
+
+
+CACHE_WORKFLOW = [
+    {"key": "login", "label": "登录平台"},
+    {"key": "course-list", "label": "获取课程列表"},
+    {"key": "details", "label": "获取课程详情"},
+    {
+        "key": "spoc-details",
+        "label": "获取 SPOC 课程详情",
+        "parent": "details",
+    },
+    {
+        "key": "bdata-details",
+        "label": "获取师道云课程与任务详情",
+        "parent": "details",
+    },
+]
+
+
+def _cache_workflow_steps(
+        *,
+        login: str = "pending",
+        course_list: str = "pending",
+        spoc: str = "pending",
+        bdata: str = "pending") -> list[dict]:
+    child_statuses = {spoc, bdata}
+    if "error" in child_statuses:
+        details = "error"
+    elif child_statuses == {"done"}:
+        details = "done"
+    elif child_statuses == {"pending"}:
+        details = "pending"
+    else:
+        details = "active"
+    statuses = {
+        "login": login,
+        "course-list": course_list,
+        "details": details,
+        "spoc-details": spoc,
+        "bdata-details": bdata,
+    }
+    return [
+        {**step, "status": statuses[str(step["key"])]}
+        for step in CACHE_WORKFLOW
+    ]
 
 
 class PlayTracker:
@@ -3125,7 +3215,8 @@ def run_combined(ctx: PluginContext, driver) -> None:
             done=0,
             total=0,
             steps=_workflow_steps(
-                ["准备任务", "完成"], completed={"准备任务", "完成"}),
+                [{"key": "prepare", "label": "准备任务"}],
+                completed={"准备任务"}),
             overall_percent=100,
         )
         ctx.status("所选范围内没有需要处理的内容", done=True)
@@ -3160,16 +3251,16 @@ def run_combined(ctx: PluginContext, driver) -> None:
     if qa_work:
         platforms.add("bdata")
 
-    labels = ["准备任务"]
+    labels: list[str | dict] = [
+        {"key": "prepare", "label": "准备任务"}]
     if "bdata" in platforms:
-        labels.append("登录师道云")
+        labels.append({"key": "login-bdata", "label": "登录师道云"})
     if "spoc" in platforms:
-        labels.append("登录 SPOC")
+        labels.append({"key": "login-spoc", "label": "登录 SPOC"})
     if jobs:
-        labels.append("视频学习")
+        labels.append({"key": "study", "label": "视频学习"})
     if qa_work:
-        labels.append("答题与互动")
-    labels.append("完成")
+        labels.append({"key": "qa", "label": "答题与互动"})
     completed_steps: set[str] = set()
     failed_steps: set[str] = set()
 
@@ -3201,9 +3292,14 @@ def run_combined(ctx: PluginContext, driver) -> None:
             spoc_platform.ensure_login(ctx, driver, load_cookies(ctx))
             completed_steps.add("登录 SPOC")
     except Exception:
+        label_names = [
+            str(item.get("label") if isinstance(item, dict) else item)
+            for item in labels
+        ]
         active_login = next(
-            (label for label in labels
-             if label.startswith("登录") and label not in completed_steps),
+            (label for label in label_names
+             if label.startswith("登录")
+             and label not in completed_steps),
             "准备任务",
         )
         failed_steps.add(active_login)
@@ -3312,7 +3408,6 @@ def run_combined(ctx: PluginContext, driver) -> None:
             failed_steps.add("答题与互动")
         else:
             completed_steps.add("答题与互动")
-    completed_steps.add("完成")
     final_steps = _workflow_steps(
         labels,
         completed=completed_steps,
@@ -3363,18 +3458,35 @@ def main() -> None:
             run_combined(ctx, driver)
             return
 
+        ctx.progress(
+            stage="cache",
+            done=0,
+            total=0,
+            steps=_cache_workflow_steps(login="active"),
+            overall_percent=0,
+        )
         bdata_ready = False
         bdata_courses: list[dict] = []
         spoc_ready = False
         spoc_cards: list[spoc_platform.CourseCard] = []
         try:
+            ctx.status("正在登录师道云并读取课程列表…")
             bdata_courses = ensure_authenticated(ctx, driver)
             bdata_ready = True
         except (RuntimeError, WebDriverException) as exc:
             ctx.log(f"师道云登录或课程发现失败: {exc}")
         cached = load_cookies(ctx)
         try:
+            ctx.status("正在登录 SPOC 并读取课程列表…")
             spoc_platform.ensure_login(ctx, driver, cached)
+            ctx.progress(
+                stage="cache",
+                done=0,
+                total=0,
+                steps=_cache_workflow_steps(
+                    login="done", course_list="active"),
+                overall_percent=0,
+            )
             spoc_cards = spoc_platform.prepare_course_list(driver)
             spoc_ready = True
         except (RuntimeError, WebDriverException) as exc:
@@ -3382,6 +3494,14 @@ def main() -> None:
         save_cookies(ctx, driver.get_cookies())
 
         if not bdata_ready and not spoc_ready:
+            ctx.progress(
+                stage="cache",
+                done=0,
+                total=0,
+                steps=_cache_workflow_steps(
+                    login="error", course_list="error"),
+                overall_percent=0,
+            )
             raise RuntimeError("SPOC 和师道云课程详情均获取失败")
         # The discovery browser has completed login and list traversal.  Close
         # it before starting the fixed-size crawl pool so the advertised
@@ -3393,7 +3513,12 @@ def main() -> None:
         driver = None
 
         cache, failures = refresh_all_caches_parallel(
-            ctx, bdata_courses, spoc_cards)
+            ctx,
+            bdata_courses,
+            spoc_cards,
+            bdata_ready=bdata_ready,
+            spoc_ready=spoc_ready,
+        )
         bdata_count = len(cache.get("bdata", {}))
         spoc_count = len(cache.get("spoc", []))
         task_count = sum(

@@ -22,43 +22,9 @@
     </div>
   </div>
 
-  <div class="bnu-row">
-    <div class="bnu-field">
-      <label>有线认证地址</label>
-      <input type="text" id="campus-wired-portal"
-        placeholder="主机名、IP 或完整 URL">
-    </div>
-    <div class="bnu-field">
-      <label>无线认证地址</label>
-      <input type="text" id="campus-wireless-portal"
-        placeholder="主机名、IP 或完整 URL">
-    </div>
-  </div>
-
-  <div class="bnu-row">
-    <div class="bnu-field">
-      <label>网络类型</label>
-      <select id="campus-connection-mode">
-        <option value="auto">自动检测</option>
-        <option value="wired">有线</option>
-        <option value="wireless">无线</option>
-      </select>
-    </div>
-    <div class="bnu-field">
-      <label>终端类型</label>
-      <select id="campus-login-type">
-        <option value="1">电脑</option>
-        <option value="0">手机</option>
-      </select>
-    </div>
-    <div class="bnu-field">
-      <label>AC ID</label>
-      <input type="text" id="campus-ac-id">
-    </div>
-    <div class="bnu-field">
-      <label>绑定 IP（通常留空）</label>
-      <input type="text" id="campus-ip">
-    </div>
+  <div class="bnu-alert">
+    认证入口固定为 <strong>172.16.202.202</strong>，终端类型固定为电脑，
+    AC ID 固定为 39，绑定 IP 自动留空。
   </div>
 
   <div class="bnu-row">
@@ -112,12 +78,6 @@
     return {
       username: $("campus-username").value.trim(),
       password: $("campus-password").value,
-      wired_portal: $("campus-wired-portal").value.trim(),
-      wireless_portal: $("campus-wireless-portal").value.trim(),
-      connection_mode: $("campus-connection-mode").value,
-      login_type: $("campus-login-type").value,
-      ac_id: $("campus-ac-id").value.trim() || "1",
-      ip: $("campus-ip").value.trim(),
       max_attempts: Math.max(1, Number($("campus-attempts").value) || 3),
       retry_interval: Math.max(1, Number($("campus-retry").value) || 10),
       request_timeout: Math.max(2, Number($("campus-timeout").value) || 10),
@@ -131,9 +91,6 @@
     var cfg = config(autostartOverride);
     if (!cfg.username || !cfg.password) {
       throw new Error("请填写校园网账号和密码");
-    }
-    if (!cfg.wired_portal && !cfg.wireless_portal) {
-      throw new Error("请至少填写一个认证地址");
     }
     await Z.saveConfig(cfg);
     if (!silent) {
@@ -199,13 +156,6 @@
     var cfg = await Z.getConfig();
     $("campus-username").value = cfg.username || "";
     $("campus-password").value = cfg.password || "";
-    $("campus-wired-portal").value = cfg.wired_portal || "";
-    $("campus-wireless-portal").value = cfg.wireless_portal || "";
-    $("campus-connection-mode").value =
-      cfg.connection_mode || "auto";
-    $("campus-login-type").value = cfg.login_type || "1";
-    $("campus-ac-id").value = cfg.ac_id || "1";
-    $("campus-ip").value = cfg.ip || "";
     $("campus-attempts").value = cfg.max_attempts || 3;
     $("campus-retry").value = cfg.retry_interval || 10;
     $("campus-timeout").value = cfg.request_timeout || 10;
@@ -224,9 +174,7 @@
     });
     $("campus-apply-autostart").addEventListener("click", applyAutostart);
     [
-      "campus-username", "campus-password", "campus-wired-portal",
-      "campus-wireless-portal", "campus-connection-mode",
-      "campus-login-type", "campus-ac-id", "campus-ip",
+      "campus-username", "campus-password",
       "campus-attempts", "campus-retry", "campus-timeout"
     ].forEach(function (id) {
       $(id).addEventListener("change", scheduleSave);

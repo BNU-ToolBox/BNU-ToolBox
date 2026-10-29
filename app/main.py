@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 WEB_DIR = ROOT / "app" / "web"
 INSTANCE_MUTEX = "Local\\BNU-ToolBox-Desktop"
-APP_WINDOW_PROFILE = DATA_DIR / "app-window"
+APP_WINDOW_PROFILE = DATA_DIR / "app-window-v2"
 
 
 def setup_consoleless_io() -> None:

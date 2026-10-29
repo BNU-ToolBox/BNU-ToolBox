@@ -16,12 +16,6 @@ def main() -> None:
     config = {
         "username": str(ctx.cfg("username") or "").strip(),
         "password": str(ctx.cfg("password") or ""),
-        "wired_portal": ctx.cfg("wired_portal", ""),
-        "wireless_portal": ctx.cfg("wireless_portal", ""),
-        "connection_mode": ctx.cfg("connection_mode", "auto"),
-        "ac_id": ctx.cfg("ac_id", "1"),
-        "login_type": ctx.cfg("login_type", "1"),
-        "ip": ctx.cfg("ip", ""),
         "request_timeout": ctx.cfg("request_timeout", 10),
         "retry_interval": ctx.cfg("retry_interval", 10),
         "max_attempts": ctx.cfg("max_attempts", 3),
@@ -37,7 +31,6 @@ def main() -> None:
             done=1,
             total=1,
             portal=result.get("portal", ""),
-            connection=result.get("connection", ""),
         )
         ctx.status(result["message"], done=True)
     except (SrunError, RuntimeError, ValueError) as exc:

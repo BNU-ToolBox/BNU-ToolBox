@@ -1,8 +1,8 @@
 {
   "id": "campus-network-auth",
   "name": "校园网认证",
-  "version": "1.1.0",
-  "description": "通过深澜认证接口自动连接北师大校园网，支持有线/无线入口自动识别、失败重试和独立于 BNU-ToolBox 的用户级开机自启。",
+  "version": "1.2.0",
+  "description": "通过固定认证入口自动连接北师大校园网，支持失败重试和独立于 BNU-ToolBox 的用户级开机自启。",
   "entry": "plugin.py",
   "config_ui": "ui.html",
   "config_schema": [
@@ -17,48 +17,6 @@
       "label": "校园网密码",
       "type": "password",
       "default": ""
-    },
-    {
-      "key": "wired_portal",
-      "label": "有线认证地址",
-      "type": "string",
-      "default": "",
-      "hint": "只填主机名或 IP，也可填写完整 URL"
-    },
-    {
-      "key": "wireless_portal",
-      "label": "无线认证地址",
-      "type": "string",
-      "default": ""
-    },
-    {
-      "key": "connection_mode",
-      "label": "网络类型",
-      "type": "choice",
-      "default": "auto",
-      "choices": ["auto", "wired", "wireless"],
-      "choice_labels": ["自动检测", "有线", "无线"]
-    },
-    {
-      "key": "ac_id",
-      "label": "AC ID",
-      "type": "string",
-      "default": "1"
-    },
-    {
-      "key": "login_type",
-      "label": "终端类型",
-      "type": "choice",
-      "default": "1",
-      "choices": ["1", "0"],
-      "choice_labels": ["电脑", "手机"]
-    },
-    {
-      "key": "ip",
-      "label": "绑定 IP",
-      "type": "string",
-      "default": "",
-      "hint": "通常留空，由程序自动获取"
     },
     {
       "key": "max_attempts",

@@ -312,7 +312,7 @@ def start_plugin(plugin_id: str):
 
 @api_router.post("/plugins/{plugin_id}/stop")
 def stop_plugin(plugin_id: str):
-    runner.stop(plugin_id)
+    runner.request_stop(plugin_id)
     if plugin_id == _BDATA_ID:
         for path in _review_paths(plugin_id):
             try:

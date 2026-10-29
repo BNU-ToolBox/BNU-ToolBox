@@ -225,11 +225,12 @@ class PluginProcess:
         self.started_at = time.time()
         self.status = STATUS_RUNNING
         self.exit_code: int | None = None
+        self.stop_requested = False
         # 最近一次 progress 事件(供 /api/plugins 轮询, 供不走 WebSocket 的
         # 场景如自定义配置界面读取); 进程结束后清除避免陈旧进度
         self.last_progress: dict | None = None
 
-    def stop(self, timeout: float = 8.0) -> bool:
+    def stop(self, timeout: float = 2.0) -> bool:
         """先发送温和停止信号,超时后结束整棵进程树。返回是否仍在运行。"""
         if self.proc.poll() is not None:
             return False
@@ -380,6 +381,23 @@ class Runner:
         # 终态统一由 _pump 发布, 避免 exited/stopped 重复或顺序倒置。
         pp.stop()
 
+    def request_stop(self, plugin_id: str) -> bool:
+        """Mark a plugin as stopping and tear it down off the API thread."""
+        with self._lock:
+            pp = self._processes.get(plugin_id)
+            if not pp or pp.proc.poll() is not None:
+                return False
+            if pp.stop_requested:
+                return True
+            pp.stop_requested = True
+            pp.status = STATUS_STOPPING
+        threading.Thread(
+            target=pp.stop,
+            daemon=True,
+            name=f"stop-{plugin_id}",
+        ).start()
+        return True
+
     # ---------- 输出采集 ----------
 
     def _pump(self, pp: PluginProcess) -> None:
@@ -407,6 +425,9 @@ class Runner:
             else:
                 pp.status = STATUS_STOPPED
             pp.exit_code = code
+            if pp.status == STATUS_STOPPED:
+                # User-requested stops always start from a clean progress state.
+                pp.last_progress = None
         self.bus.publish({
             "type": "plugin_status", "plugin": pp.plugin_id,
             "status": pp.status, "exit_code": code,

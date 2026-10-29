@@ -185,7 +185,7 @@ ctx.progress(
     steps=[
         {"label": "登录", "status": "done"},
         {"label": "学习视频", "status": "active"},
-        {"label": "完成", "status": "pending"},
+        {"label": "收尾", "status": "pending"},
     ],
 )
 ```

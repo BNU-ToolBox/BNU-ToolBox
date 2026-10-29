@@ -6,13 +6,14 @@ import random
 import re
 import socket
 import time
-from urllib.parse import urlparse
 
 import requests
 
-from network import select_portal
 from srun_codec import password_md5, sha1_hex, srun_base64, xencode
 
+PORTAL_IP = "172.16.202.202"
+AC_ID = "39"
+LOGIN_TYPE = "1"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -22,16 +23,6 @@ USER_AGENT = (
 
 class SrunError(RuntimeError):
     pass
-
-
-def normalize_portal(value: object) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if "://" not in raw:
-        raw = "http://" + raw
-    parsed = urlparse(raw)
-    return parsed.netloc or parsed.path.split("/", 1)[0]
 
 
 def _callback() -> str:
@@ -55,10 +46,7 @@ def parse_response(text: str) -> dict:
     return value
 
 
-def local_ip(portal: str, configured_ip: object = "") -> str:
-    explicit = str(configured_ip or "").strip()
-    if explicit:
-        return explicit
+def local_ip(portal: str) -> str:
     host = portal.split(":", 1)[0]
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -101,10 +89,7 @@ def authenticate(config: dict, log=None, force_login: bool = False) -> dict:
     password = str(config.get("password") or "")
     if not username or not password:
         raise SrunError("未配置校园网账号或密码")
-    portal, connection = select_portal(config)
-    portal = normalize_portal(portal)
-    if not portal:
-        raise SrunError("未配置有线或无线认证地址")
+    portal = PORTAL_IP
     timeout = max(2.0, float(config.get("request_timeout") or 10))
     session = requests.Session()
     try:
@@ -116,14 +101,13 @@ def authenticate(config: dict, log=None, force_login: bool = False) -> dict:
                     "ok": True,
                     "already_online": True,
                     "portal": portal,
-                    "connection": connection,
                     "message": "校园网已在线",
                 }
 
-        ip = local_ip(portal, config.get("ip"))
+        ip = local_ip(portal)
         callback = _callback()
-        ac_id = str(config.get("ac_id") or "1").strip()
-        login_type = str(config.get("login_type") or "1").strip()
+        ac_id = AC_ID
+        login_type = LOGIN_TYPE
         headers = {"User-Agent": USER_AGENT}
         challenge_response = session.get(
             _base_url(portal) + "/cgi-bin/get_challenge",
@@ -201,7 +185,6 @@ def authenticate(config: dict, log=None, force_login: bool = False) -> dict:
             "ok": True,
             "already_online": False,
             "portal": portal,
-            "connection": connection,
             "ip": ip,
             "message": "校园网认证成功",
         }
@@ -216,9 +199,6 @@ def connect_with_retries(config: dict, log=None, status=None) -> dict:
     password = str(config.get("password") or "")
     if not username or not password:
         raise SrunError("未配置校园网账号或密码")
-    if not (str(config.get("wired_portal") or "").strip()
-            or str(config.get("wireless_portal") or "").strip()):
-        raise SrunError("未配置有线或无线认证地址")
     attempts = max(1, int(config.get("max_attempts") or 1))
     interval = max(1.0, float(config.get("retry_interval") or 10))
     last_error = ""
@@ -229,8 +209,7 @@ def connect_with_retries(config: dict, log=None, status=None) -> dict:
             result = authenticate(config)
             if log:
                 log(
-                    f"{result['message']}（{result.get('portal', '')}，"
-                    f"{result.get('connection', '')}）")
+                    f"{result['message']}（{result.get('portal', '')}）")
             return result
         except SrunError as exc:
             last_error = str(exc)

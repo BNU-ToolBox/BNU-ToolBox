@@ -40,6 +40,7 @@
     themeMode: localStorage.getItem("bnu-toolbox-theme") || "system",
     progress: {},                 // pluginId -> {done,total,workers,...}
     lastStatus: {},               // pluginId -> 最近一次运行状态文本
+    stoppingPlugins: {},          // pluginId -> 用户已请求停止
     edgeStatus: null,
     resources: null,
     edgeUpdating: false,
@@ -85,10 +86,12 @@
       // 普通用户只看运行流程；完整日志由主程序写入 logs/plugins/。
       return;
     } else if (msg.type === "progress") {
+      if (state.stoppingPlugins[pid]) return;
       const fields = Object.assign({}, msg);
       delete fields.type; delete fields.plugin; delete fields.__event__;
       state.progress[pid] = Object.assign({}, state.progress[pid] || {}, fields);
     } else if (msg.type === "status") {
+      if (state.stoppingPlugins[pid]) return;
       state.lastStatus[pid] = msg.text || "";
       const fields = Object.assign({}, msg);
       delete fields.type; delete fields.plugin; delete fields.__event__;
@@ -96,6 +99,7 @@
     } else if (msg.type === "plugin_status") {
       updatePluginStatus(pid, msg.status);
       if (msg.status === "running") {
+        delete state.stoppingPlugins[pid];
         delete state.progress[pid];
         state.lastStatus[pid] = "正在启动…";
       } else if (msg.status === "crashed") {
@@ -106,7 +110,19 @@
         }
         state.lastStatus[pid] = "运行异常退出，请检查配置或网络后重试";
       } else if (msg.status === "stopped") {
+        const previous = state.progress[pid] || {};
+        state.progress[pid] = {
+          stage: "stopped",
+          done: 0,
+          total: 0,
+          overall_percent: 0,
+          steps: Array.isArray(previous.steps)
+            ? previous.steps.map((step) =>
+                Object.assign({}, step, { status: "pending" }))
+            : [],
+        };
         state.lastStatus[pid] = "已停止";
+        delete state.stoppingPlugins[pid];
       }
     } else if (msg.type === "plugin_installed" || msg.type === "plugin_uninstalled") {
       loadPlugins();
@@ -145,7 +161,9 @@
     const data = await api("/plugins");
     state.plugins = data.plugins;
     for (const p of state.plugins) {
-      if (p.progress) state.progress[p.id] = p.progress;
+      if (p.progress && !state.stoppingPlugins[p.id]) {
+        state.progress[p.id] = p.progress;
+      }
     }
   }
 
@@ -345,18 +363,32 @@
               }
             }
           }
+          delete state.progress[id];
+          delete state.stoppingPlugins[id];
+          state.lastStatus[id] = "正在启动…";
           await post("/plugins/" + id + "/start");
           El.ElMessage.success("已启动");
           await refresh();
-        } catch (e) { El.ElMessage.error(e.message); }
+        } catch (e) {
+          state.lastStatus[id] = "启动失败";
+          El.ElMessage.error(e.message);
+          await refresh();
+        }
       }
 
       async function stopPlugin(id) {
+        state.stoppingPlugins[id] = true;
+        updatePluginStatus(id, "stopping");
+        resetPluginProgress(id, "正在停止…");
+        El.ElMessage.info("停止指令已发送");
         try {
           await post("/plugins/" + id + "/stop");
-          El.ElMessage.info("停止指令已发送");
+        } catch (e) {
+          delete state.stoppingPlugins[id];
+          delete state.progress[id];
+          El.ElMessage.error(e.message);
           await refresh();
-        } catch (e) { El.ElMessage.error(e.message); }
+        }
       }
 
       async function saveDetailConfig() {
@@ -430,6 +462,72 @@
         return !!(info && (info.done === true || info.stage === "finish"));
       }
 
+      function fallbackSteps(pid, stage) {
+        if (pid === "bdata-autoplay") {
+          return stage === "cache"
+            ? [
+                { key: "login", label: "登录平台", status: "pending" },
+                { key: "course-list", label: "获取课程列表", status: "pending" },
+                { key: "details", label: "获取课程详情", status: "pending" },
+                { key: "spoc-details", label: "获取 SPOC 课程详情",
+                  status: "pending", parent: "details" },
+                { key: "bdata-details", label: "获取师道云课程与任务详情",
+                  status: "pending", parent: "details" },
+              ]
+            : [
+                { key: "prepare", label: "准备任务", status: "pending" },
+                { key: "login", label: "登录平台", status: "pending" },
+                { key: "study", label: "视频学习", status: "pending" },
+                { key: "qa", label: "答题与互动", status: "pending" },
+              ];
+        }
+        if (pid === "course-grab") {
+          return stage === "catalog"
+            ? [
+                { key: "login", label: "登录教务系统", status: "pending" },
+                { key: "catalog", label: "抓取专业目录", status: "pending" },
+                { key: "save", label: "保存目录缓存", status: "pending" },
+              ]
+            : stage === "courses"
+              ? [
+                  { key: "login", label: "登录教务系统", status: "pending" },
+                  { key: "query", label: "查询课程", status: "pending" },
+                  { key: "pages", label: "读取课程分页", status: "pending" },
+                  { key: "save", label: "保存课程缓存", status: "pending" },
+                ]
+              : [
+                  { key: "config", label: "读取课程配置", status: "pending" },
+                  { key: "login", label: "登录教务系统", status: "pending" },
+                  { key: "poll", label: "轮询课程余量", status: "pending" },
+                  { key: "submit", label: "提交选课", status: "pending" },
+                ];
+        }
+        if (pid === "campus-network-auth") {
+          return [
+            { key: "network", label: "检测网络", status: "pending" },
+            { key: "auth", label: "请求认证", status: "pending" },
+            { key: "verify", label: "确认连接", status: "pending" },
+          ];
+        }
+        return [
+          { key: "prepare", label: "准备", status: "pending" },
+          { key: "run", label: "运行", status: "pending" },
+        ];
+      }
+
+      function resetPluginProgress(pid, text) {
+        const old = state.progress[pid] || {};
+        const steps = fallbackSteps(pid, old.stage || "");
+        state.progress[pid] = {
+          stage: "stopped",
+          done: 0,
+          total: 0,
+          overall_percent: 0,
+          steps,
+        };
+        state.lastStatus[pid] = text;
+      }
+
       function runSteps(pid) {
         const info = state.progress[pid] || {};
         if (Array.isArray(info.steps) && info.steps.length) {
@@ -438,27 +536,18 @@
             label: step.label || "步骤 " + (index + 1),
             status: ["done", "active", "error"].includes(step.status)
               ? step.status : "pending",
+            parent: step.parent ? String(step.parent) : "",
           }));
         }
-        let labels = ["准备", "运行", "完成"];
-        if (pid === "bdata-autoplay") {
-          labels = info.stage === "cache"
-            ? ["登录平台", "获取课程详情", "保存课程缓存", "完成"]
-            : ["准备任务", "登录平台", "视频学习", "答题与互动", "完成"];
-        } else if (pid === "course-grab") {
-          labels = info.stage === "catalog"
-            ? ["登录教务系统", "抓取专业目录", "保存目录缓存", "完成"]
-            : info.stage === "courses"
-              ? ["登录教务系统", "查询课程", "读取课程分页", "保存课程缓存", "完成"]
-              : ["读取课程配置", "登录教务系统", "轮询课程余量", "提交选课"];
-        } else if (pid === "campus-network-auth") {
-          labels = ["检测网络", "请求认证", "确认连接"];
+        const steps = fallbackSteps(pid, info.stage || "");
+        if (info.stage === "stopped") {
+          return steps.map((step) => ({ ...step, status: "pending" }));
         }
         const done = statusDone(pid);
         const total = Number(info.total) || 0;
         const count = Number(info.done) || 0;
         let activeIndex = 0;
-        if (done) activeIndex = labels.length;
+        if (done) activeIndex = steps.length;
         else if (pid === "bdata-autoplay" && info.stage === "cache") {
           activeIndex = total > 0 && count >= total ? 2 : 1;
         } else if (pid === "bdata-autoplay" && info.workers) {
@@ -472,15 +561,22 @@
         } else if (pid === "campus-network-auth" && info.total > 0) {
           activeIndex = count >= total ? 3 : 1;
         }
-        return labels.map((label, index) => ({
-          key: String(index),
-          label,
+        return steps.map((step, index) => ({
+          ...step,
           status: index < activeIndex
             ? "done"
             : index === activeIndex
               ? "active"
               : "pending",
         }));
+      }
+
+      function runMainSteps(pid) {
+        return runSteps(pid).filter((step) => !step.parent);
+      }
+
+      function runChildSteps(pid, parent) {
+        return runSteps(pid).filter((step) => step.parent === parent);
       }
 
       function runMetrics(pid) {
@@ -514,6 +610,7 @@
           qaDone: Number(info.qa_done) || 0,
           qaTotal: Number(info.qa_total) || 0,
           qaTitle: info.qa_title || "",
+          showEta: info.stage === "study",
         };
       }
 
@@ -664,7 +761,8 @@
 
       return {
         state, detailPlugin, runningCount, detailModel, statusDone,
-        statusText, statusTagType, progressInfo, workerList, runSteps, runMetrics,
+        statusText, statusTagType, progressInfo, workerList,
+        runSteps, runMainSteps, runChildSteps, runMetrics,
         workerTagType, fmtDur, fmtEta, fmtEtaClock,
         startPlugin, stopPlugin, saveDetailConfig, saveGlobal,
         uninstallPlugin, triggerInstall, onZipChosen,
@@ -729,15 +827,6 @@
             </el-tooltip>
           </div>
           <div class="desc">{{ p.description }}</div>
-          <div class="progress-row" v-if="progressInfo(p.id)">
-            <el-progress
-              v-if="progressInfo(p.id).total > 0"
-              :percentage="Math.min(100, Math.round((progressInfo(p.id).done||0) / progressInfo(p.id).total * 100))"
-              :stroke-width="8" />
-            <div class="meta-line" v-else>
-              <span v-for="(v,k) in progressInfo(p.id)" :key="k">{{ k }}: {{ v }}</span>
-            </div>
-          </div>
           <div class="meta-line">
             <span>v{{ p.version }}</span>
             <span>{{ statusText(p) }}</span>
@@ -904,8 +993,10 @@
       <div v-show="state.detailTab==='run'" role="tabpanel">
         <div
           class="run-overview"
-          v-if="progressInfo(detailPlugin.id) || state.lastStatus[detailPlugin.id] || detailPlugin.running">
-          <div class="sticky-run-summary">
+          v-if="progressInfo(detailPlugin.id)">
+          <div
+            class="sticky-run-summary"
+            :class="{'has-eta': runMetrics(detailPlugin.id).showEta}">
             <div class="run-summary-copy">
               <div class="run-summary-label">总进度</div>
               <strong>{{ Math.round(runMetrics(detailPlugin.id).percent) }}%</strong>
@@ -913,7 +1004,7 @@
                 {{ state.lastStatus[detailPlugin.id] || statusText(detailPlugin) }}
               </span>
             </div>
-            <div class="run-eta">
+            <div class="run-eta" v-if="runMetrics(detailPlugin.id).showEta">
               <span>剩余时间</span>
               <strong v-if="statusDone(detailPlugin.id)">已完成</strong>
               <strong v-else-if="runMetrics(detailPlugin.id).etaS !== null">
@@ -945,7 +1036,7 @@
           </div>
           <ol class="run-flow" aria-label="任务步骤">
             <li
-              v-for="(step, index) in runSteps(detailPlugin.id)"
+              v-for="(step, index) in runMainSteps(detailPlugin.id)"
               :key="step.key"
               class="run-step"
               :class="'is-' + step.status">
@@ -963,6 +1054,29 @@
                     : step.status==='error' ? '异常' : '待完成' }}
                 </small>
               </span>
+              <ol
+                class="run-branches"
+                v-if="runChildSteps(detailPlugin.id, step.key).length"
+                :aria-label="step.label + '的分支步骤'">
+                <li
+                  v-for="child in runChildSteps(detailPlugin.id, step.key)"
+                  :key="child.key"
+                  class="run-branch"
+                  :class="'is-' + child.status">
+                  <span class="run-branch-marker" aria-hidden="true">
+                    <el-icon v-if="child.status==='done'"><check /></el-icon>
+                    <el-icon v-else-if="child.status==='active'" class="is-loading"><loading /></el-icon>
+                    <el-icon v-else-if="child.status==='error'"><close /></el-icon>
+                    <span v-else>·</span>
+                  </span>
+                  <span>{{ child.label }}</span>
+                  <small>
+                    {{ child.status==='done' ? '已完成'
+                      : child.status==='active' ? '进行中'
+                      : child.status==='error' ? '异常' : '待完成' }}
+                  </small>
+                </li>
+              </ol>
             </li>
           </ol>
 
@@ -1019,7 +1133,11 @@
           </div>
         </div>
         <div class="panel empty-state" v-else>
-          <p>暂无运行数据。点击右上角“启动”后，这里会显示流程与实时进度。</p>
+          <p v-if="detailPlugin.running">
+            <el-icon class="is-loading"><loading /></el-icon>
+            正在初始化任务流程…
+          </p>
+          <p v-else>暂无运行数据。点击右上角“启动”后，这里会显示流程与实时进度。</p>
         </div>
       </div>
 

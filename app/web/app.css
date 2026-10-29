@@ -165,7 +165,6 @@ html, body, #app {
   line-height: 1.55;
   min-height: 38px;
 }
-.plugin-card .progress-row { min-height: 22px; }
 .plugin-card .meta-line {
   display: flex;
   justify-content: space-between;
@@ -260,6 +259,9 @@ html, body, #app {
   backdrop-filter: blur(12px);
 }
 .run-summary-copy { min-width: 0; }
+.sticky-run-summary:not(.has-eta) .run-summary-copy {
+  grid-column: 1 / -1;
+}
 .run-summary-label {
   color: var(--bnu-toolbox-text-secondary);
   font-size: 12px;
@@ -368,6 +370,67 @@ html, body, #app {
 .run-step.is-error .run-step-marker {
   border-color: var(--bnu-toolbox-danger);
   color: var(--bnu-toolbox-danger);
+}
+.run-branches {
+  position: relative;
+  display: flex;
+  width: calc(100% + 20px);
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 9px;
+  padding: 4px 0 4px 15px;
+  list-style: none;
+  text-align: left;
+}
+.run-branches::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 16px;
+  left: 5px;
+  width: 2px;
+  background: var(--bnu-toolbox-border);
+}
+.run-branch {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 2px 7px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid var(--bnu-toolbox-border);
+  border-radius: 7px;
+  background: var(--bnu-toolbox-bg);
+  color: var(--bnu-toolbox-text-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.run-branch::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -10px;
+  width: 9px;
+  height: 2px;
+  background: var(--bnu-toolbox-border);
+}
+.run-branch.is-done { border-color: color-mix(in srgb, var(--bnu-toolbox-success) 55%, var(--bnu-toolbox-border)); }
+.run-branch.is-active { border-color: var(--bnu-toolbox-accent); color: var(--bnu-toolbox-text); }
+.run-branch.is-error { border-color: var(--bnu-toolbox-danger); color: var(--bnu-toolbox-danger); }
+.run-branch-marker {
+  display: inline-flex;
+  grid-row: 1 / span 2;
+  align-items: center;
+  justify-content: center;
+  color: var(--bnu-toolbox-text-secondary);
+}
+.run-branch.is-done .run-branch-marker { color: var(--bnu-toolbox-success); }
+.run-branch.is-active .run-branch-marker { color: var(--bnu-toolbox-accent); }
+.run-branch.is-error .run-branch-marker { color: var(--bnu-toolbox-danger); }
+.run-branch small {
+  grid-column: 2;
+  color: var(--bnu-toolbox-text-secondary);
+  font-size: 10.5px;
 }
 .run-step-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .run-step-copy strong { font-size: 13px; line-height: 1.35; }
