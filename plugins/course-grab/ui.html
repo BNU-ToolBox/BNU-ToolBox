@@ -448,8 +448,8 @@
           stopCatalogWatch();
           btn.disabled = false;
           hideGrabProgress();
-          hint.textContent = "抓取已结束但目录未完成(原因见下方运行日志),可点击按钮重试";
-          Z.message("error", "专业目录抓取失败,请查看运行日志后重试");
+          hint.textContent = "抓取已结束但目录未完成，可切换到“运行”页检查流程状态后重试";
+          Z.message("error", "专业目录抓取失败，请检查运行状态后重试");
         } else if (st.progress && st.progress.stage
             && st.progress.stage !== "catalog") {
           // 占用进程槽位的是其他任务(如抢课/课程抓取), 不属于目录抓取监控范围
@@ -461,7 +461,7 @@
           stopCatalogWatch();
           btn.disabled = false;
           hideGrabProgress();
-          hint.textContent = "抓取超时,请在本页运行日志查看进度后重试";
+          hint.textContent = "抓取超时，请切换到“运行”页检查进度后重试";
         } else {
           // 运行中: 渲染进度条(进度事件未到达前显示已用时间)
           renderGrabProgress(st.progress);
@@ -572,8 +572,8 @@
             var empty = $("cg-courses-empty");
             empty.hidden = false;
             empty.className = "bnu-alert bnu-error";
-            empty.textContent = "抓取已结束但课程缓存未生成(原因见下方运行日志),可点击「开始专业课程抓取」重试";
-            Z.message("error", "专业课程抓取失败,请查看运行日志后重试");
+            empty.textContent = "抓取已结束但课程缓存未生成，可切换到“运行”页检查流程状态后点击「开始专业课程抓取」重试";
+            Z.message("error", "专业课程抓取失败，请检查运行状态后重试");
           } else if (st.progress && st.progress.stage
               && st.progress.stage !== "courses") {
             // 占用进程槽位的是其他任务(如目录抓取/抢课), 不属于课程抓取监控范围

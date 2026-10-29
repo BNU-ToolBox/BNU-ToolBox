@@ -1,7 +1,7 @@
 {
   "id": "campus-network-auth",
   "name": "校园网认证",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "通过深澜认证接口自动连接北师大校园网，支持有线/无线入口自动识别、失败重试和独立于 BNU-ToolBox 的用户级开机自启。",
   "entry": "plugin.py",
   "config_ui": "ui.html",

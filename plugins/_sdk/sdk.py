@@ -3,7 +3,7 @@
 插件运行约定:
     python plugin.py --config <runtime_config.json> --datadir <用户数据目录/plugins/<id>>
 
-- 日志直接 print(),由主程序采集并推送前端
+- 日志由主程序采集,写入插件日志文件并镜像到宿主控制台
 - 进度用 ctx.progress() 输出结构化事件,前端渲染进度条
 """
 from __future__ import annotations
@@ -106,9 +106,13 @@ def _add_chromium_options(opt, headless: bool) -> None:
         opt.add_argument("--window-size=1920,1080")
 
 
-def make_edge_options(headless: bool = True) -> EdgeOptions:
+def make_edge_options(
+        headless: bool = True,
+        page_load_strategy: str | None = None) -> EdgeOptions:
     opt = EdgeOptions()
     _add_chromium_options(opt, headless)
+    if page_load_strategy:
+        opt.page_load_strategy = page_load_strategy
     return opt
 
 
@@ -123,7 +127,10 @@ def _configure_window(driver, headless: bool):
     return driver
 
 
-def make_driver(ctx: PluginContext, headless: bool | None = None):
+def make_driver(
+        ctx: PluginContext,
+        headless: bool | None = None,
+        page_load_strategy: str | None = None):
     if headless is None:
         headless = bool(ctx.cfg("headless", True))
     driver_path = ensure_edge_driver(log=ctx.log)
@@ -135,7 +142,9 @@ def make_driver(ctx: PluginContext, headless: bool | None = None):
         },
     )
     driver = webdriver.Edge(
-        service=service, options=make_edge_options(headless))
+        service=service,
+        options=make_edge_options(headless, page_load_strategy),
+    )
     return _configure_window(driver, headless)
 
 

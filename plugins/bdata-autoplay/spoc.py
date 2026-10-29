@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -43,6 +43,15 @@ NO_CONTENT_TEXT = "老师没有发布学习内容"
 VIDEO_CLASS = "icon--shipin"
 ASSIGNMENT_CLASSES = ("icon--zuoye", "icon--kaoshi")
 XTBZ_HEADERS = {"xtbz": "ykt"}
+SPOC_PAGE_LOAD_TIMEOUT = 35
+SPOC_BLOCKED_URLS = [
+    # The course page embeds an hCaptcha helper even when no challenge is shown.
+    # In practice that script often times out and holds up DOMContentLoaded.
+    "*://js.hcaptcha.com/*",
+    "*://*.hcaptcha.com/*",
+    # XuetangX's CDN only serves decorative course-cover/hero artwork here.
+    "*://qn-next.xuetangx.com/*",
+]
 
 _FETCH_JSON_JS = """
 const done = arguments[arguments.length - 1];
@@ -76,10 +85,41 @@ def _click(driver, element) -> None:
         driver.execute_script("arguments[0].click();", element)
 
 
-def is_logged_in(driver) -> bool:
+def prepare_driver(driver) -> None:
+    """Apply SPOC-only loading optimizations before the first navigation."""
     try:
-        driver.get(COURSELIST_URL)
-        WebDriverWait(driver, 8).until(
+        driver.set_page_load_strategy("eager")
+    except (AttributeError, WebDriverException):
+        pass
+    try:
+        driver.set_page_load_timeout(SPOC_PAGE_LOAD_TIMEOUT)
+    except WebDriverException:
+        pass
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd(
+            "Network.setBlockedURLs", {"urls": SPOC_BLOCKED_URLS})
+    except WebDriverException:
+        # CDP is available in the bundled Edge path. If a newer driver rejects
+        # this optional command, keep the normal page usable.
+        pass
+
+
+def _open(driver, url: str) -> None:
+    """Navigate with eager loading; a late image may time out harmlessly."""
+    try:
+        driver.get(url)
+    except TimeoutException:
+        # DOMContentLoaded usually fires long before the SPA finishes all
+        # optional assets. Selectors below still wait for the real content.
+        pass
+
+
+def is_logged_in(driver, navigate: bool = True) -> bool:
+    try:
+        if navigate:
+            _open(driver, COURSELIST_URL)
+        WebDriverWait(driver, 6).until(
             EC.presence_of_element_located(
                 (By.CSS_SELECTOR, "#pane-student .studentCol")))
         return True
@@ -89,14 +129,20 @@ def is_logged_in(driver) -> bool:
 
 def login(ctx, driver) -> list[dict]:
     """Log in through the BNU CAS flow used by the SPOC portal."""
+    prepare_driver(driver)
     ctx.log("正在登录 SPOC 统一身份认证…")
-    driver.get(LOGIN_HOME)
-    time.sleep(3)
+    _open(driver, LOGIN_HOME)
+    WebDriverWait(driver, 8).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".login-btn"))
+    )
     buttons = driver.find_elements(By.CSS_SELECTOR, ".login-btn")
     if not buttons:
         raise RuntimeError("SPOC 页面未找到登录按钮")
     _click(driver, buttons[0])
-    time.sleep(1)
+    WebDriverWait(driver, 6).until(
+        lambda d: d.find_elements(
+            By.CSS_SELECTOR, ".login-dialog .name, .login-dialog .txt")
+    )
 
     selected = False
     for element in driver.find_elements(
@@ -108,7 +154,10 @@ def login(ctx, driver) -> list[dict]:
     if not selected:
         raise RuntimeError("未找到北京师范大学统一认证入口")
 
-    time.sleep(1)
+    WebDriverWait(driver, 6).until(
+        lambda d: d.find_elements(
+            By.XPATH, "//*[contains(text(),'前往认证')]")
+    )
     for element in driver.find_elements(
             By.XPATH, "//*[contains(text(),'前往认证')]"):
         _click(driver, element)
@@ -166,13 +215,15 @@ def login(ctx, driver) -> list[dict]:
 
 
 def ensure_login(ctx, driver, cached_cookies: list[dict] | None = None) -> list[dict]:
-    driver.get(LOGIN_HOME)
-    for cookie in cached_cookies or []:
-        try:
-            driver.add_cookie(cookie)
-        except WebDriverException:
-            pass
-    if is_logged_in(driver):
+    prepare_driver(driver)
+    if cached_cookies:
+        _open(driver, LOGIN_HOME)
+        for cookie in cached_cookies:
+            try:
+                driver.add_cookie(cookie)
+            except WebDriverException:
+                pass
+    if cached_cookies and is_logged_in(driver):
         ctx.log("使用缓存 Cookie 登录 SPOC")
         return driver.get_cookies()
     return login(ctx, driver)
@@ -265,7 +316,9 @@ def _card_metadata(driver) -> list[CourseCard]:
 
 
 def prepare_course_list(driver) -> list[CourseCard]:
-    driver.get(COURSELIST_URL)
+    prepare_driver(driver)
+    if "/pro/courselist" not in driver.current_url:
+        _open(driver, COURSELIST_URL)
     deadline = time.time() + 25
     while time.time() < deadline:
         if driver.find_elements(
@@ -278,7 +331,7 @@ def prepare_course_list(driver) -> list[CourseCard]:
         By.XPATH, '//*[@id="pane-student"]/div[1]/div[2]/button')
     if all_terms:
         _click(driver, all_terms[0])
-        time.sleep(1.5)
+        time.sleep(0.5)
     return _card_metadata(driver)
 
 
@@ -442,7 +495,8 @@ def _read_status_text(driver) -> str:
 def play_video(driver, sign: str, cid: str, leaf_id: object,
                speedup: float, only_unfinished: bool = True,
                on_progress=None) -> str:
-    driver.get(VIDEO_PAGE.format(sign=sign, cid=cid, leaf_id=leaf_id))
+    prepare_driver(driver)
+    _open(driver, VIDEO_PAGE.format(sign=sign, cid=cid, leaf_id=leaf_id))
     try:
         WebDriverWait(driver, 25).until(
             EC.presence_of_element_located((By.TAG_NAME, "video")))
@@ -457,7 +511,7 @@ def play_video(driver, sign: str, cid: str, leaf_id: object,
         time.sleep(1)
     if only_unfinished and _read_status_text(driver) == "已完成":
         if on_progress:
-            on_progress(100.0, 0, duration)
+            on_progress(100.0, 0, duration, duration)
         return "已完成"
 
     driver.execute_script(
@@ -483,7 +537,7 @@ def play_video(driver, sign: str, cid: str, leaf_id: object,
         status_text = _read_status_text(driver)
         if status_text == "已完成":
             if on_progress:
-                on_progress(100.0, 0, duration)
+                on_progress(100.0, 0, duration, duration)
             return "已完成"
         played = (time.time() - started) * speedup
         try:
@@ -498,9 +552,9 @@ def play_video(driver, sign: str, cid: str, leaf_id: object,
         percent = float(match.group(1)) if match else (
             min(99.0, played / duration * 100) if duration > 0 else 0.0)
         remains = max(0.0, duration - played) / speedup if duration > 0 else None
-        if on_progress and time.time() - last_report >= 2:
+        if on_progress and time.time() - last_report >= 0.75:
             last_report = time.time()
-            on_progress(percent, remains, duration)
+            on_progress(percent, remains, duration, percent * duration / 100.0)
 
         if api_confirmed_at is None and time.time() >= poll_api:
             poll_api = time.time() + 60
@@ -513,7 +567,7 @@ def play_video(driver, sign: str, cid: str, leaf_id: object,
                 pass
         if api_confirmed_at and time.time() - api_confirmed_at > 120:
             return "服务器已记录"
-        time.sleep(5)
+        time.sleep(0.75)
     return "等待超时"
 
 

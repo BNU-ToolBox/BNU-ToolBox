@@ -29,126 +29,6 @@
     });
   }
 
-  function formatProgressSeconds(value) {
-    if (value === null || value === undefined || value === "") return "";
-    const seconds = Number(value);
-    if (!Number.isFinite(seconds) || seconds < 0) return "";
-    const total = Math.round(seconds);
-    if (total < 60) return total + " 秒";
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const rest = total % 60;
-    if (hours) return hours + " 小时 " + minutes + " 分";
-    return minutes + " 分" + (rest ? " " + rest + " 秒" : "");
-  }
-
-  function formatProgressWorkers(workers) {
-    if (!workers || typeof workers !== "object") return "";
-    const counts = {};
-    Object.values(workers).forEach((worker) => {
-      if (!worker || typeof worker !== "object") return;
-      const status = String(worker.status || "未知").trim() || "未知";
-      counts[status] = (counts[status] || 0) + 1;
-    });
-    const parts = Object.entries(counts).map(([status, count]) =>
-      count > 1 ? status + " × " + count : status);
-    return parts.length ? "进程：" + parts.join("，") : "";
-  }
-
-  function formatProgressValue(value) {
-    if (Array.isArray(value)) {
-      return value.slice(0, 8).join("、");
-    }
-    if (value && typeof value === "object") return "对象";
-    return String(value);
-  }
-
-  function formatProgressEvent(fields) {
-    const parts = [];
-    const stageNames = {
-      catalog: "专业目录抓取",
-      courses: "课程列表读取",
-      cache: "课程任务缓存",
-      grab: "抢课轮询",
-      qa: "答题与互动",
-      study: "视频学习",
-    };
-    const stage = fields.stage && String(fields.stage)
-      || (fields.round !== undefined && fields.round !== null ? "grab" : "");
-    if (stage) parts.push(stageNames[stage] || "阶段：" + stage);
-
-    if (fields.round !== undefined && fields.round !== null) {
-      parts.push("第 " + fields.round + " 轮");
-    }
-
-    const hasDone = fields.done !== null && fields.done !== undefined;
-    const hasTotal = fields.total !== null && fields.total !== undefined;
-    const done = Number(fields.done);
-    const total = Number(fields.total);
-    const hasCount = hasDone && hasTotal
-      && Number.isFinite(done) && Number.isFinite(total);
-    if (hasCount) {
-      let countText = done + "/" + total;
-      if (total > 0) {
-        const percent = Math.min(100, Math.max(0, done / total * 100));
-        countText += "（" + (Math.round(percent * 10) / 10) + "%）";
-      }
-      parts.push(countText);
-    }
-
-    if (fields.course) parts.push(String(fields.course));
-    if (fields.title) parts.push(String(fields.title).slice(0, 120));
-
-    const hasWatched = fields.watched_seconds !== null
-      && fields.watched_seconds !== undefined;
-    const requiredRaw = fields.required_seconds !== null
-      && fields.required_seconds !== undefined
-      ? fields.required_seconds : fields.target_seconds;
-    const hasRequired = requiredRaw !== null && requiredRaw !== undefined;
-    const watched = Number(fields.watched_seconds);
-    const required = Number(requiredRaw);
-    if (hasWatched && hasRequired
-        && Number.isFinite(watched) && Number.isFinite(required)) {
-      parts.push("服务器进度 " + formatProgressSeconds(watched) +
-                 " / " + formatProgressSeconds(required));
-    } else if (fields.percent !== undefined && fields.percent !== null) {
-      const percent = Number(fields.percent);
-      if (Number.isFinite(percent)) {
-        parts.push("进度 " + (Math.round(percent * 10) / 10) + "%");
-      }
-    }
-
-    const eta = formatProgressSeconds(
-      fields.eta_seconds !== undefined && fields.eta_seconds !== null
-        ? fields.eta_seconds : fields.eta_s);
-    if (eta) parts.push("预计剩余 " + eta);
-    if (fields.polled !== undefined && fields.polled !== null) {
-      parts.push("已轮询 " + fields.polled + " 次");
-    }
-    if (fields.fatal !== undefined && fields.fatal !== null) {
-      parts.push("连续异常 " + fields.fatal + " 次");
-    }
-    if (fields.status) parts.push("状态：" + fields.status);
-
-    const workerText = formatProgressWorkers(fields.workers);
-    if (workerText) parts.push(workerText);
-
-    if (!parts.length) {
-      const labels = {
-        attempt: "尝试次数",
-        page: "页码",
-        stage: "阶段",
-        speed: "倍速",
-      };
-      Object.entries(fields).slice(0, 8).forEach(([key, value]) => {
-        if (key === "workers") return;
-        if (value === null || value === undefined || value === "") return;
-        parts.push((labels[key] || key) + "：" + formatProgressValue(value));
-      });
-    }
-    return "[进度] " + (parts.join(" · ") || "已更新");
-  }
-
   // ---------------- 状态 ----------------
 
   const state = reactive({
@@ -158,8 +38,8 @@
     globalConfig: null,
     wsConnected: false,
     themeMode: localStorage.getItem("bnu-toolbox-theme") || "system",
-    logs: {},                     // pluginId -> [ {line, cls} ]
     progress: {},                 // pluginId -> {done,total,workers,...}
+    lastStatus: {},               // pluginId -> 最近一次运行状态文本
     edgeStatus: null,
     resources: null,
     edgeUpdating: false,
@@ -169,16 +49,8 @@
     savingGlobal: false,
     installing: false,
     uiHtml: null,                 // 自定义配置界面 HTML(插件 config_ui 提供)
+    detailTab: "run",             // run | config
   });
-
-  const MAX_LOG_LINES = 2000;
-
-  function pushLog(pluginId, line, cls) {
-    if (!state.logs[pluginId]) state.logs[pluginId] = [];
-    const arr = state.logs[pluginId];
-    arr.push({ line, cls: cls || "" });
-    if (arr.length > MAX_LOG_LINES) arr.splice(0, arr.length - MAX_LOG_LINES);
-  }
 
   // ---------------- WebSocket ----------------
 
@@ -210,22 +82,31 @@
     const pid = msg.plugin;
     if (!pid) return;
     if (msg.type === "log") {
-      let cls = "";
-      if (/error|异常|崩溃|失败|Traceback/i.test(msg.line)) cls = "status";
-      pushLog(pid, msg.line, cls);
+      // 普通用户只看运行流程；完整日志由主程序写入 logs/plugins/。
+      return;
     } else if (msg.type === "progress") {
       const fields = Object.assign({}, msg);
       delete fields.type; delete fields.plugin; delete fields.__event__;
-      state.progress[pid] = fields;
-      pushLog(pid, formatProgressEvent(fields), "progress");
+      state.progress[pid] = Object.assign({}, state.progress[pid] || {}, fields);
     } else if (msg.type === "status") {
-      pushLog(pid, "◆ " + (msg.text || ""), "status");
+      state.lastStatus[pid] = msg.text || "";
+      const fields = Object.assign({}, msg);
+      delete fields.type; delete fields.plugin; delete fields.__event__;
+      state.progress[pid] = Object.assign({}, state.progress[pid] || {}, fields);
     } else if (msg.type === "plugin_status") {
       updatePluginStatus(pid, msg.status);
-      if (msg.status === "stopped" || msg.status === "crashed" || msg.status === "exited") {
-        // 终态后不再保留上一轮进度, 否则仪表盘会永久显示旧进度条。
+      if (msg.status === "running") {
         delete state.progress[pid];
-        pushLog(pid, "—— 进程结束 (" + msg.status + (msg.exit_code !== undefined && msg.exit_code !== null ? ", exit " + msg.exit_code : "") + ") ——", "sysinfo");
+        state.lastStatus[pid] = "正在启动…";
+      } else if (msg.status === "crashed") {
+        const info = state.progress[pid];
+        if (info && Array.isArray(info.steps)) {
+          info.steps = info.steps.map((step) =>
+            step.status === "active" ? Object.assign({}, step, { status: "error" }) : step);
+        }
+        state.lastStatus[pid] = "运行异常退出，请检查配置或网络后重试";
+      } else if (msg.status === "stopped") {
+        state.lastStatus[pid] = "已停止";
       }
     } else if (msg.type === "plugin_installed" || msg.type === "plugin_uninstalled") {
       loadPlugins();
@@ -265,7 +146,6 @@
     state.plugins = data.plugins;
     for (const p of state.plugins) {
       if (p.progress) state.progress[p.id] = p.progress;
-      else if (!p.running) delete state.progress[p.id];
     }
   }
 
@@ -282,6 +162,7 @@
     const requestId = ++detailRequest;
     state.detailId = id;
     state.page = "detail";
+    state.detailTab = "run";
     state.detailSchema = p.config_schema || [];
     state.detailConfig = null;
     state.uiHtml = null;
@@ -302,13 +183,6 @@
       }
     } else {
       state.detailConfig = buildEditorModel(state.detailSchema, data.config);
-    }
-    if (!state.logs[id]) {
-      const logs = await api("/plugins/" + id + "/logs?limit=300");
-      if (requestId !== detailRequest) return;
-      state.logs[id] = logs.events
-        .filter((e) => e.type === "log")
-        .map((e) => ({ line: e.line, cls: "" }));
     }
   }
 
@@ -367,8 +241,6 @@
 
   const app = createApp({
     setup() {
-      const logBoxRef = ref(null);
-
       const detailPlugin = computed(() =>
         state.plugins.find((x) => x.id === state.detailId) || null);
 
@@ -387,22 +259,6 @@
         await loadEdgeStatus();
         await loadResources();
       });
-
-      // 日志自动滚动
-      watch(
-        () => {
-          const id = state.detailId;
-          const arr = state.logs[id];
-          return arr ? arr.length : 0;
-        },
-        async () => {
-          await nextTick();
-          const box = logBoxRef.value;
-          if (!box) return;
-          const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-          if (nearBottom) box.scrollTop = box.scrollHeight;
-        }
-      );
 
       const statusText = (p) => ({
         running: "运行中", stopped: "已停止", exited: "已结束",
@@ -569,6 +425,98 @@
         return state.progress[pid] || null;
       }
 
+      function statusDone(pid) {
+        const info = state.progress[pid];
+        return !!(info && (info.done === true || info.stage === "finish"));
+      }
+
+      function runSteps(pid) {
+        const info = state.progress[pid] || {};
+        if (Array.isArray(info.steps) && info.steps.length) {
+          return info.steps.map((step, index) => ({
+            key: String(step.key || index),
+            label: step.label || "步骤 " + (index + 1),
+            status: ["done", "active", "error"].includes(step.status)
+              ? step.status : "pending",
+          }));
+        }
+        let labels = ["准备", "运行", "完成"];
+        if (pid === "bdata-autoplay") {
+          labels = info.stage === "cache"
+            ? ["登录平台", "获取课程详情", "保存课程缓存", "完成"]
+            : ["准备任务", "登录平台", "视频学习", "答题与互动", "完成"];
+        } else if (pid === "course-grab") {
+          labels = info.stage === "catalog"
+            ? ["登录教务系统", "抓取专业目录", "保存目录缓存", "完成"]
+            : info.stage === "courses"
+              ? ["登录教务系统", "查询课程", "读取课程分页", "保存课程缓存", "完成"]
+              : ["读取课程配置", "登录教务系统", "轮询课程余量", "提交选课"];
+        } else if (pid === "campus-network-auth") {
+          labels = ["检测网络", "请求认证", "确认连接"];
+        }
+        const done = statusDone(pid);
+        const total = Number(info.total) || 0;
+        const count = Number(info.done) || 0;
+        let activeIndex = 0;
+        if (done) activeIndex = labels.length;
+        else if (pid === "bdata-autoplay" && info.stage === "cache") {
+          activeIndex = total > 0 && count >= total ? 2 : 1;
+        } else if (pid === "bdata-autoplay" && info.workers) {
+          activeIndex = 2;
+        } else if (pid === "course-grab" && info.stage === "catalog") {
+          activeIndex = total > 0 && count >= total ? 2 : 1;
+        } else if (pid === "course-grab" && info.stage === "courses") {
+          activeIndex = total > 0 && count >= total ? 3 : 2;
+        } else if (pid === "course-grab" && info.round) {
+          activeIndex = 2;
+        } else if (pid === "campus-network-auth" && info.total > 0) {
+          activeIndex = count >= total ? 3 : 1;
+        }
+        return labels.map((label, index) => ({
+          key: String(index),
+          label,
+          status: index < activeIndex
+            ? "done"
+            : index === activeIndex
+              ? "active"
+              : "pending",
+        }));
+      }
+
+      function runMetrics(pid) {
+        const info = state.progress[pid] || {};
+        let percent = 0;
+        if (info.overall_percent !== undefined
+            && info.overall_percent !== null
+            && Number.isFinite(Number(info.overall_percent))) {
+          percent = Number(info.overall_percent);
+        } else if (Number(info.total) > 0) {
+          percent = Number(info.done || 0) / Number(info.total) * 100;
+        } else if (Number(info.qa_total) > 0) {
+          percent = Number(info.qa_done || 0) / Number(info.qa_total) * 100;
+        } else if (statusDone(pid)) {
+          percent = 100;
+        }
+        const eta = info.eta_s !== undefined && info.eta_s !== null
+          ? info.eta_s : info.eta_seconds;
+        return {
+          percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+          etaS: eta !== undefined && eta !== null && isFinite(Number(eta))
+            ? Number(eta) : null,
+          watchedS: info.watched_seconds !== undefined
+            && info.watched_seconds !== null
+            && Number.isFinite(Number(info.watched_seconds))
+            ? Number(info.watched_seconds) : null,
+          totalS: info.total_seconds !== undefined
+            && info.total_seconds !== null
+            && Number.isFinite(Number(info.total_seconds))
+            ? Number(info.total_seconds) : null,
+          qaDone: Number(info.qa_done) || 0,
+          qaTotal: Number(info.qa_total) || 0,
+          qaTitle: info.qa_title || "",
+        };
+      }
+
       function workerList(pid) {
         const info = state.progress[pid];
         if (!info || !info.workers) return [];
@@ -581,6 +529,7 @@
           etaS: (w.eta_s === null || w.eta_s === undefined) ? null : w.eta_s,
           totalS: (w.total_s === null || w.total_s === undefined) ? null : w.total_s,
           replays: w.replays || 0,
+          watchedS: w.watched_s === undefined ? null : w.watched_s,
         }));
       }
 
@@ -625,10 +574,6 @@
       function removeCourseRow(idx) {
         if (!state.detailConfig || !state.detailConfig.__rows__) return;
         state.detailConfig.__rows__.splice(idx, 1);
-      }
-
-      function clearLog(pid) {
-        state.logs[pid] = [];
       }
 
       // ---------------- 自定义配置界面桥(config_ui 插件) ----------------
@@ -718,12 +663,12 @@
       });
 
       return {
-        state, logBoxRef, detailPlugin, runningCount, detailModel,
-        statusText, statusTagType, progressInfo, workerList,
+        state, detailPlugin, runningCount, detailModel, statusDone,
+        statusText, statusTagType, progressInfo, workerList, runSteps, runMetrics,
         workerTagType, fmtDur, fmtEta, fmtEtaClock,
         startPlugin, stopPlugin, saveDetailConfig, saveGlobal,
         uninstallPlugin, triggerInstall, onZipChosen,
-        addCourseRow, removeCourseRow, clearLog, setThemeMode, refresh,
+        addCourseRow, removeCourseRow, setThemeMode, refresh,
         loadEdgeStatus, updateEdgeDriver, Icons,
       };
     },
@@ -804,7 +749,7 @@
             <el-button v-else type="danger" plain @click="stopPlugin(p.id)">
               <el-icon style="margin-right:4px"><video-pause /></el-icon>停止
             </el-button>
-            <el-button @click="openDetailById(p.id)">配置 / 日志</el-button>
+            <el-button @click="openDetailById(p.id)">打开</el-button>
           </div>
         </div>
       </div>
@@ -924,7 +869,9 @@
     <!-- 插件详情 -->
     <template v-if="state.page==='detail' && detailPlugin">
       <div class="page-header" style="display:flex;align-items:center;gap:14px">
-        <el-button circle @click="state.page='dashboard'"><el-icon><back /></el-icon></el-button>
+        <el-button circle aria-label="返回仪表盘" @click="state.page='dashboard'">
+          <el-icon><back /></el-icon>
+        </el-button>
         <div>
           <h1>{{ detailPlugin.name }} <el-tag size="small" effect="plain">v{{ detailPlugin.version }}</el-tag></h1>
           <p>{{ detailPlugin.description }}</p>
@@ -939,122 +886,207 @@
         </div>
       </div>
 
-      <div class="panel">
-        <h2><el-icon><setting /></el-icon> 插件配置</h2>
-        <!-- 自定义配置界面(插件 config_ui 提供; 不含 CSS, 风格由宿主 bnu-* 类统一) -->
-        <div v-if="state.uiHtml" id="plugin-ui"></div>
-        <template v-else-if="state.detailConfig">
-          <el-form label-width="190px" style="max-width:720px">
-            <template v-for="f in state.detailSchema" :key="f.key">
-              <!-- 对象型字段(schema 简易表单无对应控件, 仅提示) -->
-              <el-form-item v-if="f.type==='specialty'" :label="f.label">
-                <span class="form-hint">{{ f.hint || "请在插件自定义配置界面中选择" }}</span>
-              </el-form-item>
-
-              <!-- 课程表格 -->
-              <el-form-item v-else-if="f.type==='course-table'" :label="f.label">
-                <div style="width:100%">
-                  <div class="form-hint" style="margin-bottom:8px" v-if="f.hint">{{ f.hint }}</div>
-                  <div class="course-row" v-for="(row, idx) in (state.detailConfig.__rows__ || [])" :key="idx">
-                    <el-input class="course-code" v-model="row.code" placeholder="课程代码" />
-                    <el-input class="course-classes" v-model="row.classes" placeholder="候选班级号,逗号分隔(如 09, 10, 11)" />
-                    <el-button type="danger" plain circle size="small" @click="removeCourseRow(idx)">
-                      <el-icon><delete /></el-icon>
-                    </el-button>
-                  </div>
-                  <el-button size="small" @click="addCourseRow"><el-icon><plus /></el-icon>添加课程</el-button>
-                </div>
-              </el-form-item>
-
-              <!-- 字符串列表 -->
-              <el-form-item v-else-if="f.type==='string-list'" :label="f.label">
-                <div style="width:100%">
-                  <el-input
-                    v-model="state.detailConfig.__text__[f.key]"
-                    type="textarea" :rows="8"
-                    placeholder="一行一个链接" />
-                  <div class="form-hint" style="margin-top:4px" v-if="f.hint">{{ f.hint }}</div>
-                </div>
-              </el-form-item>
-
-              <!-- 下拉选择 -->
-              <el-form-item v-else-if="f.type==='choice'" :label="f.label">
-                <el-select v-model="state.detailConfig[f.key]" style="width:100%">
-                  <el-option
-                    v-for="(c, i) in (f.choices || [])" :key="c"
-                    :value="c"
-                    :label="(f.choice_labels && f.choice_labels[i]) || c" />
-                </el-select>
-              </el-form-item>
-
-              <!-- 数字 -->
-              <el-form-item v-else-if="f.type==='number'" :label="f.label">
-                <el-input-number
-                  v-model="state.detailConfig[f.key]"
-                  :min="f.min !== undefined ? f.min : -Infinity"
-                  :max="f.max !== undefined ? f.max : Infinity"
-                  :step="f.step || 1" />
-              </el-form-item>
-
-              <!-- 开关 -->
-              <el-form-item v-else-if="f.type==='bool'" :label="f.label">
-                <el-switch v-model="state.detailConfig[f.key]" />
-              </el-form-item>
-
-              <!-- 密码 / 字符串 -->
-              <el-form-item v-else :label="f.label">
-                <el-input
-                  v-model="state.detailConfig[f.key]"
-                  :type="f.type==='password' ? 'password' : 'text'"
-                  :show-password="f.type==='password'"
-                  :placeholder="f.type==='password' ? '已加密存储' : ''" />
-              </el-form-item>
-            </template>
-          </el-form>
-          <el-button type="primary" :loading="state.savingConfig" @click="saveDetailConfig">保存配置</el-button>
-          <span class="form-hint" style="margin-left:10px">账号留空时使用全局设置;保存后重启插件生效</span>
-        </template>
-        <div v-else class="empty-state"><el-icon class="is-loading"><loading /></el-icon> 配置加载中…</div>
+      <div class="detail-tabs" role="tablist" aria-label="插件页面">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="state.detailTab==='run'"
+          :class="{active: state.detailTab==='run'}"
+          @click="state.detailTab='run'">运行</button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="state.detailTab==='config'"
+          :class="{active: state.detailTab==='config'}"
+          @click="state.detailTab='config'">配置</button>
       </div>
 
-      <div class="panel">
-        <h2>
-          <el-icon><document /></el-icon> 运行日志
-          <div style="margin-left:auto;display:flex;gap:8px">
-            <el-button size="small" @click="clearLog(detailPlugin.id)">清空显示</el-button>
-          </div>
-        </h2>
-        <div class="log-box" ref="logBoxRef">
-          <div v-if="!(state.logs[detailPlugin.id] && state.logs[detailPlugin.id].length)" class="empty-state">
-            暂无日志,启动插件后这里将实时输出
-          </div>
-          <div v-for="(l, i) in (state.logs[detailPlugin.id] || [])" :key="i" class="log-line" :class="l.cls">{{ l.line }}</div>
-        </div>
-        <!-- 每线程工作面板 -->
-        <div class="worker-panels"
-          v-if="detailPlugin.id !== 'bdata-autoplay' && workerList(detailPlugin.id).length">
-          <div class="worker-panel" v-for="w in workerList(detailPlugin.id)" :key="w.id">
-            <div class="wp-head">
-              <el-tag size="small" :type="workerTagType(w.status)">进程 #{{ w.id }}</el-tag>
-              <span class="wp-status">{{ w.status }}</span>
-              <span class="wp-title" :title="(w.course ? w.course + ' · ' : '') + w.title">
-                {{ w.course ? w.course + " · " : "" }}{{ w.title || "—" }}
+      <div v-show="state.detailTab==='run'" role="tabpanel">
+        <div
+          class="run-overview"
+          v-if="progressInfo(detailPlugin.id) || state.lastStatus[detailPlugin.id] || detailPlugin.running">
+          <div class="sticky-run-summary">
+            <div class="run-summary-copy">
+              <div class="run-summary-label">总进度</div>
+              <strong>{{ Math.round(runMetrics(detailPlugin.id).percent) }}%</strong>
+              <span class="run-summary-status" aria-live="polite">
+                {{ state.lastStatus[detailPlugin.id] || statusText(detailPlugin) }}
               </span>
             </div>
-            <template v-if="w.percent !== null">
-              <el-progress
-                :percentage="Math.min(100, Math.round(w.percent * 10) / 10)"
-                :stroke-width="8"
-                :status="w.status === '已完成' ? 'success' : undefined" />
-              <div class="wp-meta">
-                <span>进度 {{ w.percent }}%(服务器)</span>
-                <span>时长 {{ fmtDur(w.totalS) }}</span>
-                <span>剩余 {{ fmtEta(w.etaS) }}</span>
-                <span>预计 {{ fmtEtaClock(w.etaS) }} 完成</span>
-                <span v-if="w.replays">重播 {{ w.replays }} 次</span>
-              </div>
-            </template>
+            <div class="run-eta">
+              <span>剩余时间</span>
+              <strong v-if="statusDone(detailPlugin.id)">已完成</strong>
+              <strong v-else-if="runMetrics(detailPlugin.id).etaS !== null">
+                {{ fmtEta(runMetrics(detailPlugin.id).etaS) }}
+              </strong>
+              <strong v-else>估算中</strong>
+            </div>
+            <el-progress
+              class="run-total-progress"
+              :percentage="runMetrics(detailPlugin.id).percent"
+              :stroke-width="12"
+              :show-text="false"
+              :status="statusDone(detailPlugin.id) ? 'success' : undefined" />
+            <div class="run-time-line">
+              <span v-if="!statusDone(detailPlugin.id) && runMetrics(detailPlugin.id).watchedS !== null">
+                服务器已记录 {{ fmtDur(runMetrics(detailPlugin.id).watchedS) }}
+                / {{ fmtDur(runMetrics(detailPlugin.id).totalS) }}
+              </span>
+              <span v-if="runMetrics(detailPlugin.id).qaTotal">
+                答题互动 {{ runMetrics(detailPlugin.id).qaDone }}
+                / {{ runMetrics(detailPlugin.id).qaTotal }}
+              </span>
+            </div>
           </div>
+
+          <div class="run-section-heading">
+            <h2>任务流程</h2>
+            <span class="form-hint">完成后自动更新</span>
+          </div>
+          <ol class="run-flow" aria-label="任务步骤">
+            <li
+              v-for="(step, index) in runSteps(detailPlugin.id)"
+              :key="step.key"
+              class="run-step"
+              :class="'is-' + step.status">
+              <span class="run-step-marker" aria-hidden="true">
+                <el-icon v-if="step.status==='done'"><check /></el-icon>
+                <el-icon v-else-if="step.status==='active'" class="is-loading"><loading /></el-icon>
+                <el-icon v-else-if="step.status==='error'"><close /></el-icon>
+                <span v-else>{{ index + 1 }}</span>
+              </span>
+              <span class="run-step-copy">
+                <strong>{{ step.label }}</strong>
+                <small>
+                  {{ step.status==='done' ? '已完成'
+                    : step.status==='active' ? '进行中'
+                    : step.status==='error' ? '异常' : '待完成' }}
+                </small>
+              </span>
+            </li>
+          </ol>
+
+          <div class="inline-progress-row" v-if="runMetrics(detailPlugin.id).qaTotal">
+            <div class="inline-progress-label">
+              <strong>答题与互动</strong>
+              <span>{{ runMetrics(detailPlugin.id).qaTitle || "处理中" }}</span>
+            </div>
+            <el-progress
+              :percentage="Math.min(100,
+                runMetrics(detailPlugin.id).qaDone /
+                runMetrics(detailPlugin.id).qaTotal * 100)"
+              :stroke-width="9" />
+          </div>
+
+          <template v-if="workerList(detailPlugin.id).length">
+            <div class="run-section-heading worker-heading">
+              <h2>并行进程</h2>
+              <span class="form-hint">
+                {{ workerList(detailPlugin.id).length }} 个浏览器进程
+              </span>
+            </div>
+            <div class="worker-panels">
+              <div class="worker-panel" v-for="w in workerList(detailPlugin.id)" :key="w.id">
+                <div class="wp-head">
+                  <el-tag size="small" :type="workerTagType(w.status)">进程 #{{ w.id }}</el-tag>
+                  <span class="wp-status">{{ w.status }}</span>
+                  <span class="wp-title" :title="(w.course ? w.course + ' · ' : '') + w.title">
+                    {{ w.course ? w.course + " · " : "" }}{{ w.title || "—" }}
+                  </span>
+                </div>
+                <el-progress
+                  v-if="w.percent !== null"
+                  :percentage="Math.min(100, Math.round(w.percent * 10) / 10)"
+                  :stroke-width="9"
+                  :status="w.status === '已完成' ? 'success' : undefined" />
+                <div class="wp-meta">
+                  <span v-if="w.percent !== null">服务器进度 {{ w.percent }}%</span>
+                  <span v-if="w.watchedS !== null">已记录 {{ fmtDur(w.watchedS) }}</span>
+                  <span v-if="w.totalS !== null">视频时长 {{ fmtDur(w.totalS) }}</span>
+                  <span v-if="w.etaS !== null">剩余 {{ fmtEta(w.etaS) }}</span>
+                  <span v-if="w.etaS !== null">预计 {{ fmtEtaClock(w.etaS) }} 完成</span>
+                  <span v-if="w.replays">重播 {{ w.replays }} 次</span>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <div
+            class="review-link"
+            v-if="(state.lastStatus[detailPlugin.id] || '').includes('核验')">
+            <span>当前有模型生成内容等待人工核验。</span>
+            <el-button type="warning" @click="state.detailTab='config'">前往核验</el-button>
+          </div>
+        </div>
+        <div class="panel empty-state" v-else>
+          <p>暂无运行数据。点击右上角“启动”后，这里会显示流程与实时进度。</p>
+        </div>
+      </div>
+
+      <div v-show="state.detailTab==='config'" role="tabpanel">
+        <div class="panel">
+          <h2><el-icon><setting /></el-icon> 插件配置</h2>
+          <!-- 自定义配置界面(插件 config_ui 提供; 不含 CSS, 风格由宿主 bnu-* 类统一) -->
+          <div v-if="state.uiHtml" id="plugin-ui"></div>
+          <template v-else-if="state.detailConfig">
+            <el-form label-width="190px" style="max-width:720px">
+              <template v-for="f in state.detailSchema" :key="f.key">
+                <el-form-item v-if="f.type==='specialty'" :label="f.label">
+                  <span class="form-hint">{{ f.hint || "请在插件自定义配置界面中选择" }}</span>
+                </el-form-item>
+                <el-form-item v-else-if="f.type==='course-table'" :label="f.label">
+                  <div style="width:100%">
+                    <div class="form-hint" style="margin-bottom:8px" v-if="f.hint">{{ f.hint }}</div>
+                    <div class="course-row" v-for="(row, idx) in (state.detailConfig.__rows__ || [])" :key="idx">
+                      <el-input class="course-code" v-model="row.code" placeholder="课程代码" />
+                      <el-input class="course-classes" v-model="row.classes" placeholder="候选班级号，以逗号分隔（如 09, 10, 11）" />
+                      <el-button type="danger" plain circle size="small" aria-label="删除课程" @click="removeCourseRow(idx)">
+                        <el-icon><delete /></el-icon>
+                      </el-button>
+                    </div>
+                    <el-button size="small" @click="addCourseRow"><el-icon><plus /></el-icon>添加课程</el-button>
+                  </div>
+                </el-form-item>
+                <el-form-item v-else-if="f.type==='string-list'" :label="f.label">
+                  <div style="width:100%">
+                    <el-input
+                      v-model="state.detailConfig.__text__[f.key]"
+                      type="textarea" :rows="8"
+                      placeholder="每行填写一个链接…" />
+                    <div class="form-hint" style="margin-top:4px" v-if="f.hint">{{ f.hint }}</div>
+                  </div>
+                </el-form-item>
+                <el-form-item v-else-if="f.type==='choice'" :label="f.label">
+                  <el-select v-model="state.detailConfig[f.key]" style="width:100%">
+                    <el-option
+                      v-for="(c, i) in (f.choices || [])" :key="c"
+                      :value="c"
+                      :label="(f.choice_labels && f.choice_labels[i]) || c" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-else-if="f.type==='number'" :label="f.label">
+                  <el-input-number
+                    v-model="state.detailConfig[f.key]"
+                    :min="f.min !== undefined ? f.min : -Infinity"
+                    :max="f.max !== undefined ? f.max : Infinity"
+                    :step="f.step || 1" />
+                </el-form-item>
+                <el-form-item v-else-if="f.type==='bool'" :label="f.label">
+                  <el-switch v-model="state.detailConfig[f.key]" />
+                </el-form-item>
+                <el-form-item v-else :label="f.label">
+                  <el-input
+                    v-model="state.detailConfig[f.key]"
+                    :type="f.type==='password' ? 'password' : 'text'"
+                    :show-password="f.type==='password'"
+                    :placeholder="f.type==='password' ? '已加密存储' : ''" />
+                </el-form-item>
+              </template>
+            </el-form>
+            <el-button type="primary" :loading="state.savingConfig" @click="saveDetailConfig">保存配置</el-button>
+            <span class="form-hint" style="margin-left:10px">账号留空时使用全局设置；保存后重启插件生效。</span>
+          </template>
+          <div v-else class="empty-state"><el-icon class="is-loading"><loading /></el-icon> 配置加载中…</div>
         </div>
       </div>
     </template>

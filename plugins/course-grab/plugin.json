@@ -1,7 +1,7 @@
 {
   "id": "course-grab",
   "name": "教务抢课",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "持续轮询北师大教务系统课程名额，自动选中并提交；支持多课程、多班级候选，可按专业自动获取课程列表。",
   "entry": "plugin.py",
   "config_ui": "ui.html",

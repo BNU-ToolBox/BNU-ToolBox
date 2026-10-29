@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -10,8 +11,11 @@ import threading
 import time
 import uuid
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
+
+from .paths import LOG_DIR
 
 _ROOT = Path(__file__).resolve().parents[2]
 BUILTIN_PLUGINS_DIR = _ROOT / "plugins"
@@ -52,6 +56,116 @@ def _safe_unlink(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _format_seconds(value: object) -> str:
+    try:
+        seconds = max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        return ""
+    minutes, second = divmod(seconds, 60)
+    hours, minute = divmod(minutes, 60)
+    if hours:
+        return f"{hours} 小时 {minute} 分"
+    if minutes:
+        return f"{minutes} 分 {second} 秒"
+    return f"{second} 秒"
+
+
+def _format_event(event: dict) -> str:
+    """Turn plugin events into compact, human-readable log lines."""
+    event_type = str(event.get("type") or "log")
+    if event_type == "log":
+        return str(event.get("line") or "")
+    if event_type == "status":
+        return f"[状态] {event.get('text') or '已更新'}"
+    if event_type == "plugin_status":
+        return f"[进程] {event.get('status') or '未知'}"
+    if event_type != "progress":
+        return f"[{event_type}]"
+
+    stage_names = {
+        "prepare": "准备任务",
+        "cache": "获取课程详情",
+        "study": "学习视频",
+        "qa": "答题与互动",
+        "catalog": "抓取专业目录",
+        "courses": "抓取课程列表",
+        "grab": "轮询选课",
+        "finish": "完成",
+    }
+    parts: list[str] = []
+    stage = event.get("stage")
+    if stage:
+        parts.append(stage_names.get(str(stage), str(stage)))
+    if event.get("round") is not None:
+        parts.append(f"第 {event['round']} 轮")
+    if event.get("done") is not None or event.get("total") is not None:
+        parts.append(f"{event.get('done', 0)}/{event.get('total', 0)}")
+    if event.get("course"):
+        parts.append(str(event["course"]))
+    if event.get("title"):
+        parts.append(str(event["title"]))
+    watched = event.get("watched_seconds")
+    total = event.get(
+        "required_seconds",
+        event.get("target_seconds", event.get("total_seconds")))
+    if watched is not None and total is not None:
+        parts.append(
+            f"服务器记录 {_format_seconds(watched)} / "
+            f"{_format_seconds(total)}")
+    elif event.get("percent") is not None:
+        parts.append(f"进度 {event['percent']}%")
+    eta = event.get("eta_seconds", event.get("eta_s"))
+    if eta is not None:
+        parts.append(f"剩余 {_format_seconds(eta)}")
+    if event.get("status"):
+        parts.append(f"状态 {event['status']}")
+    return "[进度] " + " · ".join(parts) if parts else "[进度] 已更新"
+
+
+class _PluginLogWriter:
+    """Write one rotating log per plugin and mirror readable events to console."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loggers: dict[str, logging.Logger] = {}
+
+    def _logger(self, plugin_id: str) -> logging.Logger:
+        logger = self._loggers.get(plugin_id)
+        if logger is not None:
+            return logger
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOG_DIR / "plugins" / f"{plugin_id}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        logger = logging.getLogger(
+            f"bnu-toolbox.plugin.{plugin_id}.{id(self)}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        handler = RotatingFileHandler(
+            path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logger.addHandler(handler)
+        self._loggers[plugin_id] = logger
+        return logger
+
+    def write(self, plugin_id: str, event: dict) -> None:
+        line = _format_event(event)
+        if not line:
+            return
+        with self._lock:
+            self._logger(plugin_id).info(line)
+            print(f"[{plugin_id}] {line}", flush=True)
+
+
+_plugin_logs = _PluginLogWriter()
 
 
 class EventBus:
@@ -283,6 +397,7 @@ class Runner:
                     if k not in ("type", "plugin", "__event__")
                 }
                 pp.last_progress["ts"] = round(time.time(), 3)
+            _plugin_logs.write(pp.plugin_id, event)
             self.bus.publish(event)
         code = proc.wait()
         _safe_unlink(pp.config_path)
@@ -292,7 +407,6 @@ class Runner:
             else:
                 pp.status = STATUS_STOPPED
             pp.exit_code = code
-            pp.last_progress = None   # 进程已结束, 清除避免陈旧进度
         self.bus.publish({
             "type": "plugin_status", "plugin": pp.plugin_id,
             "status": pp.status, "exit_code": code,

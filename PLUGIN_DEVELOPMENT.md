@@ -19,7 +19,7 @@ plugins/<plugin-id>/plugin.py
 这种设计具有以下约束：
 
 - 同一 `plugin_id` 同时只能存在一个运行实例。
-- 插件通过标准输出发送日志、状态和进度。
+- 插件通过标准输出发送日志、状态和进度；用户只看到运行流程，日志写入文件。
 - 插件进程退出后，宿主停止推送进度并广播终态。
 - 插件停止时，宿主先尝试温和终止；超时后结束其进程树。
 - 插件文件在每次启动时从磁盘加载，修改插件代码后重新运行即可生效。
@@ -156,7 +156,8 @@ if __name__ == "__main__":
 
 ## 5. 日志、状态与进度
 
-插件标准输出按行读取。非结构化文本会显示为普通日志；单行 JSON 且包含 `__event__` 时，会转换为结构化事件。
+插件标准输出按行读取。非结构化文本会作为日志写入文件并镜像到宿主控制台；
+单行 JSON 且包含 `__event__` 时会转换为结构化事件。普通用户界面不再展示原始日志。
 
 ### 普通日志
 
@@ -174,7 +175,19 @@ ctx.status("任务完成", done=True)
 ### 进度事件
 
 ```python
-ctx.progress(done=3, total=10, title="当前任务")
+ctx.progress(
+    stage="study",
+    done=3,
+    total=10,
+    title="当前任务",
+    overall_percent=30,
+    eta_seconds=120,
+    steps=[
+        {"label": "登录", "status": "done"},
+        {"label": "学习视频", "status": "active"},
+        {"label": "完成", "status": "pending"},
+    ],
+)
 ```
 
 推荐使用以下字段：
@@ -185,11 +198,19 @@ ctx.progress(done=3, total=10, title="当前任务")
 | `total` | 总数量。 |
 | `title` | 当前处理对象。 |
 | `percent` | 百分比进度。 |
+| `overall_percent` | 总进度百分比，用于运行页固定进度条。 |
 | `eta_seconds` | 预计剩余秒数。 |
+| `watched_seconds` | 服务器已记录的学习秒数。 |
+| `total_seconds` | 当前统计范围内的视频总秒数。 |
+| `stage` | 当前阶段，如 `prepare`、`cache`、`study`、`qa`、`finish`。 |
+| `steps` | 流程图步骤数组；`status` 使用 `done`、`active`、`error`、`pending`。 |
 
 每个事件必须单独占一行，并立即刷新输出。SDK 的 `ctx.log`、`ctx.status` 和 `ctx.progress` 已处理刷新，插件应优先使用这些方法。
 
-最近一次进度会通过插件列表 API 暴露给前端；进程结束后自动清除。日志中不得输出密码、Cookie、令牌或其他敏感值。
+最近一次进度会通过插件列表 API 暴露给前端，并在进程结束后保留最终状态。
+宿主将日志写入 `%LOCALAPPDATA%\BNU-ToolBox\logs\plugins\<plugin-id>.log`，
+单文件 5 MB、保留 3 个轮转备份，并同步输出到宿主控制台。日志中不得输出密码、
+Cookie、令牌或其他敏感值。
 
 ## 6. Selenium 与浏览器
 
@@ -250,6 +271,7 @@ required = find_strict(driver, '//*[@id="required"]', timeout=10)
 - 配色、间距、按钮和表格应使用宿主提供的 `bnu-*` 类。
 - 后端下发界面前会移除插件样式。
 - 界面脚本会重新创建执行，因此应处理初始化失败和重复挂载。
+- 运行页由宿主根据结构化事件绘制，自定义配置页不应再实现运行日志或进度面板。
 
 宿主注入 `window.BnuToolBoxConfigUI` 桥接对象：
 
@@ -344,6 +366,7 @@ example-plugin.zip
 5. 网络抖动时的有限重试和可恢复进度。
 6. 同一插件被重复启动时的状态冲突。
 
-排查运行问题时，应结合插件详情页日志、宿主日志
-`%LOCALAPPDATA%\BNU-ToolBox\logs\bnu-toolbox.log` 和浏览器当前页面状态。
+排查运行问题时，应结合插件日志
+`%LOCALAPPDATA%\BNU-ToolBox\logs\plugins\<plugin-id>.log`、宿主日志
+`%LOCALAPPDATA%\BNU-ToolBox\logs\bnu-toolbox.log`、运行页步骤状态和浏览器当前页面状态。
 日志应提供具体步骤、目标元素和失败原因，但不得包含账号密码或完整认证 Cookie。

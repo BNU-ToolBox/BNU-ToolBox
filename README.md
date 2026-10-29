@@ -29,7 +29,8 @@ BNU-ToolBox 是面向北师大校园学习场景的 Windows 11 桌面工具箱�
 
 1. 在“全局设置”中填写北师大统一身份认证账号。
 2. 在校园网认证插件中填写独立的校园网账号和认证地址。
-3. 打开目标插件，完成配置并启动任务。
+3. 打开目标插件的“配置”页完成设置，再启动任务。
+4. 在“运行”页查看任务流程、总进度、剩余时间和并行进程状态。
 
 系统必须已安装 Microsoft Edge。应用会自动读取 Edge 版本，并从微软官方服务下载匹配
 版本的 Edge WebDriver。
@@ -97,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 产物：
 
 ```text
-dist\installer\BNU-ToolBox-Setup-0.0.1.exe
+dist\installer\BNU-ToolBox-Setup-1.0.0.exe
 ```
 
 ## 项目结构

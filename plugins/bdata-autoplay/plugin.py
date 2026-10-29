@@ -21,6 +21,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1156,7 +1157,11 @@ def _crawl_spoc_parallel(
         driver = None
         try:
             driver = make_driver(
-                ctx, headless=bool(ctx.cfg("headless", True)))
+                ctx,
+                headless=bool(ctx.cfg("headless", True)),
+                page_load_strategy="eager",
+            )
+            spoc_platform.prepare_driver(driver)
             driver.set_page_load_timeout(60)
             spoc_platform.ensure_login(ctx, driver, cookies)
             while True:
@@ -1245,15 +1250,42 @@ def refresh_all_caches_parallel(
     cookies = load_cookies(ctx)
     progress_lock = threading.Lock()
     progress_done = 0
+    labels = ["登录平台", "获取课程详情", "保存课程缓存", "完成"]
+    ctx.progress(
+        stage="cache",
+        done=0,
+        total=total_courses,
+        steps=_workflow_steps(
+            labels, active=("获取课程详情",), completed={"登录平台"}),
+        overall_percent=0,
+    )
 
     def report(title: str) -> None:
         nonlocal progress_done
         with progress_lock:
             progress_done += 1
             current = progress_done
+        completed = {"登录平台"}
+        if current >= total_courses:
+            completed.add("获取课程详情")
+        ctx.status(
+            f"正在获取课程详情 {current}/{total_courses}…",
+            stage="cache",
+        )
         ctx.progress(
             stage="cache", done=current, total=total_courses,
-            title=title)
+            title=title,
+            steps=_workflow_steps(
+                labels,
+                active=(
+                    ("保存课程缓存",) if current >= total_courses
+                    else ("获取课程详情",)
+                ),
+                completed=completed,
+            ),
+            overall_percent=round(current / total_courses * 100, 1)
+            if total_courses else 100,
+        )
 
     with ThreadPoolExecutor(max_workers=2) as starters:
         bdata_future = starters.submit(
@@ -1295,6 +1327,14 @@ def refresh_all_caches_parallel(
         ]
     cache["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save_task_cache(ctx, cache)
+    ctx.progress(
+        stage="finish",
+        done=total_courses,
+        total=total_courses,
+        steps=_workflow_steps(labels, completed=set(labels)),
+        overall_percent=100,
+        eta_s=0,
+    )
     return cache, {
         "bdata_failed": len(bdata_failures),
         "spoc_failed": len(spoc_failures),
@@ -2234,13 +2274,46 @@ def viewed(media_duration: float, watched: float) -> float:
     return min(max(0.0, media_duration), max(0.0, watched))
 
 
+def _workflow_steps(
+        labels: list[str],
+        *,
+        active: tuple[str, ...] = (),
+        completed: set[str] | None = None,
+        failed: set[str] | None = None) -> list[dict]:
+    completed = completed or set()
+    failed = failed or set()
+    steps = []
+    for label in labels:
+        if label in failed:
+            status = "error"
+        elif label in completed:
+            status = "done"
+        elif label in active:
+            status = "active"
+        else:
+            status = "pending"
+        steps.append({"label": label, "status": status})
+    return steps
+
+
 class PlayTracker:
-    def __init__(self, total: int):
+    def __init__(
+            self,
+            total: int,
+            speedup: float = 3.0,
+            steps: list[dict] | None = None):
         self.total = total
         self.done = 0
+        self.speedup = max(1.0, float(speedup or 1.0))
+        self.started_at = time.time()
         self.lock = threading.Lock()
         self.workers: dict[int, dict] = {}
         self.results: dict[str, str] = {}
+        self.measures: dict[str, tuple[float, float]] = {}
+        self.steps = [dict(item) for item in (steps or [])]
+        self.qa_done = 0
+        self.qa_total = 0
+        self.qa_title = ""
 
     def set_worker(self, worker_id: int, **fields) -> None:
         with self.lock:
@@ -2255,12 +2328,76 @@ class PlayTracker:
             elif previous == "已完成" and status != "已完成":
                 self.done -= 1
 
+    def set_measure(
+            self,
+            job_key: str,
+            watched_seconds: float | None,
+            total_seconds: float | None) -> None:
+        try:
+            total = max(0.0, float(total_seconds or 0))
+            watched = max(0.0, float(watched_seconds or 0))
+        except (TypeError, ValueError):
+            return
+        if total <= 0:
+            return
+        with self.lock:
+            self.measures[job_key] = (min(watched, total), total)
+
+    def set_step(self, label: str, status: str) -> None:
+        with self.lock:
+            for step in self.steps:
+                if step.get("label") == label:
+                    step["status"] = status
+
+    def set_qa_progress(
+            self, done: int, total: int, title: str = "") -> None:
+        with self.lock:
+            self.qa_done = max(0, int(done))
+            self.qa_total = max(0, int(total))
+            if title:
+                self.qa_title = title
+
     def snapshot(self) -> dict:
         with self.lock:
+            workers = {str(k): dict(v) for k, v in self.workers.items()}
+            measured = list(self.measures.values())
+            known_total = sum(total for _watched, total in measured)
+            watched_total = sum(watched for watched, _total in measured)
+            missing = max(0, self.total - len(measured))
+            average = known_total / len(measured) if measured else 0.0
+            estimated_total = known_total + missing * average
+            if estimated_total > 0:
+                percent = min(100.0, watched_total / estimated_total * 100)
+            elif self.qa_total > 0:
+                percent = min(100.0, self.qa_done / self.qa_total * 100)
+            else:
+                percent = self.done / self.total * 100 if self.total else 0.0
+            active_workers = sum(
+                1 for worker in workers.values()
+                if worker.get("status") in {"检查中", "播放中", "重播中"}
+            )
+            remaining_media = max(0.0, estimated_total - watched_total)
+            eta_seconds = (
+                remaining_media
+                / max(1, active_workers)
+                / self.speedup
+                if estimated_total > 0 else None
+            )
             return {
                 "done": self.done,
                 "total": self.total,
-                "workers": {str(k): dict(v) for k, v in self.workers.items()},
+                "stage": "study",
+                "workers": workers,
+                "steps": [dict(step) for step in self.steps],
+                "overall_percent": round(percent, 1),
+                "watched_seconds": round(watched_total, 1),
+                "total_seconds": round(estimated_total, 1),
+                "remaining_seconds": round(remaining_media, 1),
+                "eta_s": round(eta_seconds) if eta_seconds is not None else None,
+                "elapsed_s": round(time.time() - self.started_at),
+                "qa_done": self.qa_done,
+                "qa_total": self.qa_total,
+                "qa_title": self.qa_title,
             }
 
 
@@ -2486,6 +2623,7 @@ def _play_bdata_job(ctx: PluginContext, driver, job: dict, worker_id: int,
         raise RuntimeError("师道云视频时长不可用")
     page_label = wait_duration_label(driver)
     watched = float(parse_duration_seconds(page_label))
+    tracker.set_measure(job["key"], watched, media_duration)
     if only_unfinished and (
             "已完成" in page_label
             or is_complete(watched, media_duration, tolerance)):
@@ -2493,12 +2631,18 @@ def _play_bdata_job(ctx: PluginContext, driver, job: dict, worker_id: int,
         tracker.set_worker(
             worker_id, status="已完成", title=title, percent=100.0,
             eta_s=0, total_s=round(media_duration))
+        tracker.set_measure(job["key"], media_duration, media_duration)
         ctx.log(
             f"[w{worker_id}] 师道云跳过已完成 "
             f"{watched:.0f}/{media_duration:.0f}s: {title}")
         return
 
     def report(fields: dict) -> None:
+        tracker.set_measure(
+            job["key"],
+            fields.get("watched_seconds"),
+            fields.get("target_seconds"),
+        )
         tracker.set_worker(
             worker_id,
             status="重播中" if fields.get("replaying") else "播放中",
@@ -2519,6 +2663,7 @@ def _play_bdata_job(ctx: PluginContext, driver, job: dict, worker_id: int,
     tracker.set_worker(
         worker_id, status="已完成", title=title, percent=100.0,
         eta_s=0, total_s=round(media_duration))
+    tracker.set_measure(job["key"], media_duration, media_duration)
     ctx.log(
         f"[w{worker_id}] 师道云完成 "
         f"{watched:.0f}/{media_duration:.0f}s: {title}")
@@ -2532,15 +2677,20 @@ def _play_spoc_job(ctx: PluginContext, driver, job: dict, worker_id: int,
         worker_id, platform="SPOC", status="检查中", title=title,
         percent=0.0, eta_s=None, total_s=None,
         course=job["course_title"])
+    last_duration = 0.0
 
     def report(percent: float, remain_s: float | None,
-               duration: float) -> None:
+               duration: float, watched_s: float | None = None) -> None:
+        nonlocal last_duration
+        last_duration = float(duration or 0.0)
+        tracker.set_measure(job["key"], watched_s, duration)
         tracker.set_worker(
             worker_id, status="播放中", title=title,
             percent=round(percent, 1),
             eta_s=round(remain_s) if remain_s is not None else None,
             total_s=round(duration) if duration else None,
-            course=job["course_title"])
+            course=job["course_title"],
+            watched_s=round(watched_s or 0))
 
     status = spoc_platform.play_video(
         driver, job["sign"], job["cid"], job["leaf_id"], speedup,
@@ -2556,6 +2706,8 @@ def _play_spoc_job(ctx: PluginContext, driver, job: dict, worker_id: int,
             only_unfinished=only_unfinished, on_progress=report)
     complete = status in {"已完成", "服务器已记录"}
     tracker.mark(job["key"], "已完成" if complete else status)
+    if complete and last_duration:
+        tracker.set_measure(job["key"], last_duration, last_duration)
     tracker.set_worker(
         worker_id, status="已完成" if complete else status, title=title,
         percent=100.0 if complete else None, eta_s=0 if complete else None,
@@ -2615,10 +2767,17 @@ def run_worker(ctx: PluginContext, worker_id: int, jobs: queue.Queue,
         tracker.set_worker(worker_id, status="已关闭")
 
 
-def run_parallel(ctx: PluginContext, jobs: list[dict], cookies: list[dict],
-                 initial_driver, speedup: float, tolerance: float,
-                 only_unfinished: bool, worker_count: int) -> PlayTracker:
-    tracker = PlayTracker(len(jobs))
+def run_parallel(
+        ctx: PluginContext,
+        jobs: list[dict],
+        cookies: list[dict],
+        initial_driver,
+        speedup: float,
+        tolerance: float,
+        only_unfinished: bool,
+        worker_count: int,
+        steps: list[dict] | None = None) -> PlayTracker:
+    tracker = PlayTracker(len(jobs), speedup=speedup, steps=steps)
     work: queue.Queue = queue.Queue()
     for job in jobs:
         work.put(job)
@@ -2641,7 +2800,7 @@ def run_parallel(ctx: PluginContext, jobs: list[dict], cookies: list[dict],
     ctx.progress(**tracker.snapshot())
     while any(thread.is_alive() for thread in threads):
         ctx.progress(**tracker.snapshot())
-        time.sleep(1.0)
+        time.sleep(0.35)
     ctx.progress(**tracker.snapshot())
     return tracker
 
@@ -2856,7 +3015,9 @@ def run_qa(ctx: PluginContext, driver,
 
 def run_qa_work(ctx: PluginContext, driver,
                 work: list[tuple[tuple[str, str], str, dict | str, str]],
-                full_auto: bool = False) -> tuple[int, int]:
+                full_auto: bool = False,
+                on_progress: Callable[..., None] | None = None
+                ) -> tuple[int, int]:
     """Run cached BData quiz/interaction work without touching video progress."""
     if not work:
         return 0, 0
@@ -2878,6 +3039,13 @@ def run_qa_work(ctx: PluginContext, driver,
         for course, course_title, work_item, entry_xpath in work:
             course_url, _cid = course
             driver.get(course_url)
+            label = (
+                work_item if isinstance(work_item, str)
+                else normalize_title(work_item.get("description")))
+            if on_progress:
+                on_progress(
+                    done + skipped, len(work),
+                    f"{course_title} · {label}")
             try:
                 if isinstance(work_item, str):
                     ctx.log(
@@ -2899,9 +3067,11 @@ def run_qa_work(ctx: PluginContext, driver,
                 skipped += int(not succeeded)
             except (LLMError, RuntimeError, WebDriverException) as exc:
                 skipped += 1
-                label = (work_item if isinstance(work_item, str)
-                         else work_item.get("description"))
                 ctx.log(f"答题或互动失败: {label}: {exc}")
+            if on_progress:
+                on_progress(
+                    done + skipped, len(work),
+                    f"{course_title} · {label}")
     finally:
         broker.clear()
     ctx.log(
@@ -2913,13 +3083,15 @@ def run_qa_work(ctx: PluginContext, driver,
 def run_qa_worker(ctx: PluginContext,
                   work: list[tuple[tuple[str, str], str, dict | str, str]],
                   cookies: list[dict], full_auto: bool,
-                  result: dict) -> None:
+                  result: dict,
+                  on_progress: Callable[..., None] | None = None) -> None:
     driver = None
     try:
         driver = make_driver(ctx, headless=bool(ctx.cfg("headless", True)))
         inject_domain_cookies(driver, LOGIN_HOME, cookies)
         result["done"], result["skipped"] = run_qa_work(
-            ctx, driver, work, full_auto=full_auto)
+            ctx, driver, work, full_auto=full_auto,
+            on_progress=on_progress)
     except Exception as exc:
         result["error"] = str(exc)
         ctx.log(f"并行答题与互动线程失败: {exc}")
@@ -2948,7 +3120,14 @@ def run_combined(ctx: PluginContext, driver) -> None:
     )
     total_qa = len(quiz_items) + len(interaction_items)
     if not jobs and not total_qa:
-        ctx.progress(done=0, total=0)
+        ctx.progress(
+            stage="finish",
+            done=0,
+            total=0,
+            steps=_workflow_steps(
+                ["准备任务", "完成"], completed={"准备任务", "完成"}),
+            overall_percent=100,
+        )
         ctx.status("所选范围内没有需要处理的内容", done=True)
         return
     spoc_count = sum(1 for job in jobs if job["platform"] == "spoc")
@@ -2980,15 +3159,84 @@ def run_combined(ctx: PluginContext, driver) -> None:
     platforms = {job["platform"] for job in jobs}
     if qa_work:
         platforms.add("bdata")
+
+    labels = ["准备任务"]
     if "bdata" in platforms:
-        ctx.status("正在登录师道云…")
-        ensure_authenticated(ctx, driver, discover_courses=False)
+        labels.append("登录师道云")
     if "spoc" in platforms:
-        ctx.status("正在登录 SPOC…")
-        spoc_platform.ensure_login(ctx, driver, load_cookies(ctx))
+        labels.append("登录 SPOC")
+    if jobs:
+        labels.append("视频学习")
+    if qa_work:
+        labels.append("答题与互动")
+    labels.append("完成")
+    completed_steps: set[str] = set()
+    failed_steps: set[str] = set()
+
+    def publish_steps(active: tuple[str, ...], **fields: object) -> None:
+        ctx.progress(
+            steps=_workflow_steps(
+                labels,
+                active=active,
+                completed=completed_steps,
+                failed=failed_steps,
+            ),
+            **fields,
+        )
+
+    publish_steps(("准备任务",), stage="prepare",
+                  done=0, total=len(jobs), course="")
+    completed_steps.add("准备任务")
+    try:
+        if "bdata" in platforms:
+            publish_steps(("登录师道云",), stage="prepare",
+                          done=0, total=len(jobs))
+            ctx.status("正在登录师道云…")
+            ensure_authenticated(ctx, driver, discover_courses=False)
+            completed_steps.add("登录师道云")
+        if "spoc" in platforms:
+            publish_steps(("登录 SPOC",), stage="prepare",
+                          done=0, total=len(jobs))
+            ctx.status("正在登录 SPOC…")
+            spoc_platform.ensure_login(ctx, driver, load_cookies(ctx))
+            completed_steps.add("登录 SPOC")
+    except Exception:
+        active_login = next(
+            (label for label in labels
+             if label.startswith("登录") and label not in completed_steps),
+            "准备任务",
+        )
+        failed_steps.add(active_login)
+        publish_steps((), stage="prepare", done=0, total=len(jobs))
+        raise
     if platforms:
         save_cookies(ctx, driver.get_cookies())
     cookie_set = load_cookies(ctx) or driver.get_cookies()
+
+    current_video_steps = [dict(step) for step in _workflow_steps(
+        labels,
+        active=tuple(
+            label for label in ("视频学习", "答题与互动")
+            if label in labels and (
+                (label == "视频学习" and jobs)
+                or (label == "答题与互动" and qa_work)
+            )
+        ),
+        completed=completed_steps,
+        failed=failed_steps,
+    )]
+    tracker = None
+    if not jobs and qa_work:
+        tracker = PlayTracker(
+            0,
+            speedup=bounded_float(ctx.cfg("speedup", 3), 3.0, 1.0, 3.0),
+            steps=current_video_steps,
+        )
+
+    def qa_progress(done: int, total: int, title: str = "") -> None:
+        if tracker is not None:
+            tracker.set_qa_progress(done, total, title)
+            ctx.progress(**tracker.snapshot())
 
     if qa_work and jobs:
         if not str(ctx.cfg("api_key") or "").strip():
@@ -2996,7 +3244,9 @@ def run_combined(ctx: PluginContext, driver) -> None:
                 "自动答题或评论回复已启用，但未配置模型 API Key")
         qa_thread = threading.Thread(
             target=run_qa_worker,
-            args=(ctx, qa_work, cookie_set, full_auto, qa_result),
+            args=(
+                ctx, qa_work, cookie_set, full_auto, qa_result,
+                qa_progress),
             daemon=True,
             name="bnu-qa-worker",
         )
@@ -3005,28 +3255,49 @@ def run_combined(ctx: PluginContext, driver) -> None:
         raise RuntimeError(
             "自动答题或评论回复已启用，但未配置模型 API Key")
 
-    tracker = None
     if jobs:
         workers = min(configured_worker_count(ctx), len(jobs))
+        ctx.status(
+            "正在并行学习视频并处理答题互动…"
+            if qa_thread is not None else "正在并行学习视频…")
         ctx.log(
             f"开始混合播放视频: {len(jobs)} 个, {workers} 并发")
+        speedup = bounded_float(ctx.cfg("speedup", 3), 3.0, 1.0, 3.0)
         tracker = run_parallel(
             ctx,
             jobs,
             cookie_set,
             driver,
-            bounded_float(ctx.cfg("speedup", 3), 3.0, 1.0, 3.0),
+            speedup,
             bounded_float(
                 ctx.cfg("completion_tolerance", 3), 3.0, 0.0, 30.0),
             bool(ctx.cfg("only_unfinished", True)),
             workers,
+            steps=current_video_steps,
         )
+        if all(status == "已完成" for status in tracker.results.values()):
+            completed_steps.add("视频学习")
+            tracker.set_step("视频学习", "done")
+        else:
+            failed_steps.add("视频学习")
+            tracker.set_step("视频学习", "error")
     if not jobs and qa_work:
         result: dict = {}
-        run_qa_worker(ctx, qa_work, cookie_set, full_auto, result)
+        ctx.status("正在处理答题与互动…")
+        publish_steps(("答题与互动",), stage="qa",
+                      done=0, total=total_qa)
+        run_qa_worker(
+            ctx, qa_work, cookie_set, full_auto, result, qa_progress)
         qa_thread = None
         qa_result.update(result)
     if qa_thread is not None:
+        while qa_thread.is_alive():
+            if tracker is not None:
+                ctx.progress(**tracker.snapshot())
+            else:
+                publish_steps(("答题与互动",), stage="qa",
+                              done=0, total=total_qa)
+            time.sleep(0.5)
         qa_thread.join()
 
     video_done = sum(
@@ -3036,10 +3307,34 @@ def run_combined(ctx: PluginContext, driver) -> None:
     qa_skipped = int(qa_result.get("skipped", 0))
     if qa_result.get("error"):
         ctx.log(f"并行答题线程错误: {qa_result['error']}")
+    if qa_work:
+        if qa_result.get("error"):
+            failed_steps.add("答题与互动")
+        else:
+            completed_steps.add("答题与互动")
+    completed_steps.add("完成")
+    final_steps = _workflow_steps(
+        labels,
+        completed=completed_steps,
+        failed=failed_steps,
+    )
+    final_snapshot = tracker.snapshot() if tracker else {}
     ctx.progress(
+        stage="finish",
         done=video_done,
         total=len(jobs),
-        workers=tracker.snapshot()["workers"] if tracker else {},
+        workers=final_snapshot.get("workers", {}),
+        steps=final_steps,
+        watched_seconds=final_snapshot.get("watched_seconds"),
+        total_seconds=final_snapshot.get("total_seconds"),
+        qa_done=qa_done,
+        qa_total=total_qa,
+        overall_percent=(
+            100 if not failed_steps and video_done == len(jobs) else
+            round(video_done / len(jobs) * 100, 1) if jobs else
+            round(qa_done / total_qa * 100, 1) if total_qa else 100
+        ),
+        eta_s=0,
     )
     ctx.status(
         f"BNU刷课结束: 视频完成 {video_done}/{len(jobs)}，"
@@ -3060,7 +3355,8 @@ def main() -> None:
         task_mode = "combined"
     headless = bool(ctx.cfg("headless", True))
 
-    driver = make_driver(ctx, headless=headless)
+    driver = make_driver(
+        ctx, headless=headless, page_load_strategy="eager")
     driver.set_page_load_timeout(60)
     try:
         if task_mode == "combined":

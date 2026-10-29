@@ -127,14 +127,6 @@
     </div>
   </div>
 
-  <div id="bnu-progress-panel" hidden>
-    <div class="bnu-row">
-      <strong>刷课分线程进度</strong>
-      <span class="bnu-hint" id="bnu-overall-progress"></span>
-    </div>
-    <div class="bnu-worker-grid" id="bnu-worker-cards"></div>
-  </div>
-
   <div class="bnu-alert" id="bnu-msg" hidden></div>
 </div>
 
@@ -150,9 +142,8 @@
   var currentFields = [];
   var sending = false;
   var cacheTimer = null;
-  var progressTimer = null;
+  var reviewTimer = null;
   var saveTimer = null;
-  var latestProgress = null;
   var resources = null;
   var acceptedHighWorkers = 0;
 
@@ -657,7 +648,7 @@
         Z.message(
           plugin && plugin.status === "crashed" ? "error" : "success",
           plugin && plugin.status === "crashed"
-            ? "课程详情获取失败，请查看下方日志"
+            ? "课程详情获取失败，请检查账号与网络后重试"
             : "课程详情已更新");
       } catch (e) {
         /* Keep polling. */
@@ -822,95 +813,11 @@
     }
   }
 
-  function fmtDuration(value) {
-    if (value === null || value === undefined || !isFinite(value)) return "-";
-    value = Math.max(0, Math.round(Number(value)));
-    var minutes = Math.floor(value / 60);
-    var seconds = value % 60;
-    return minutes + ":" + String(seconds).padStart(2, "0");
-  }
-
-  function workerCard(worker) {
-    var card = document.createElement("div");
-    card.className = "bnu-worker";
-    var head = document.createElement("div");
-    head.className = "bnu-worker-head";
-    var info = document.createElement("div");
-    var platform = document.createElement("span");
-    platform.className = "bnu-platform " +
-      (worker.platform === "SPOC" ? "spoc" : "bdata");
-    platform.textContent = worker.platform || "刷课";
-    info.appendChild(platform);
-    var title = document.createElement("div");
-    title.className = "bnu-worker-title";
-    title.textContent = (worker.course ? worker.course + " · " : "") +
-      (worker.title || "—");
-    title.title = title.textContent;
-    info.appendChild(title);
-    head.appendChild(info);
-    var status = document.createElement("span");
-    status.className = "bnu-hint";
-    status.textContent = worker.status || "";
-    head.appendChild(status);
-    card.appendChild(head);
-    var progress = document.createElement("div");
-    progress.className = "bnu-progress";
-    var bar = document.createElement("div");
-    bar.className = "bnu-progress-bar";
-    bar.style.width = Math.max(0, Math.min(
-      100, Number(worker.percent) || 0)) + "%";
-    progress.appendChild(bar);
-    card.appendChild(progress);
-    var meta = document.createElement("div");
-    meta.className = "bnu-worker-meta";
-    meta.textContent = "服务器进度 " +
-      (worker.percent === null || worker.percent === undefined
-        ? "-" : worker.percent + "%") +
-      " · 时长 " + fmtDuration(worker.total_s) +
-      " · 剩余 " + fmtDuration(worker.eta_s) +
-      (worker.replays ? " · 重播 " + worker.replays + " 次" : "");
-    card.appendChild(meta);
-    return card;
-  }
-
-  function renderWorkers(progress, plugin) {
-    var panel = $("bnu-progress-panel");
-    var root = $("bnu-worker-cards");
-    if (plugin && plugin.running) {
-      panel.hidden = false;
-      if (!root.children.length) {
-        $("bnu-overall-progress").textContent = "正在启动分线程…";
-      }
-    }
-    if (!progress || !progress.workers) {
-      return;
-    }
-    panel.hidden = false;
-    $("bnu-overall-progress").textContent =
-      "已完成 " + (progress.done || 0) + "/" + (progress.total || 0);
-    root.textContent = "";
-    Object.keys(progress.workers)
-      .sort(function (a, b) { return Number(a) - Number(b); })
-      .forEach(function (key) {
-        root.appendChild(workerCard(progress.workers[key]));
-      });
-  }
-
-  async function pollReviewAndProgress() {
+  async function pollReview() {
     try {
       var review = await Z.api("plugins/" + pluginId + "/review");
       renderReview(review.request || null);
     } catch (e) { /* Plugin may be idle. */ }
-    try {
-      var data = await Z.api("plugins");
-      var plugin = (data.plugins || []).find(function (item) {
-        return item.id === pluginId;
-      });
-      if (plugin && plugin.progress && plugin.progress.workers) {
-        latestProgress = plugin.progress;
-      }
-      renderWorkers(latestProgress, plugin);
-    } catch (e) { /* Ignore transient polling errors. */ }
   }
 
   async function init() {
@@ -974,11 +881,11 @@
     syncSurveyStrategy();
     updateWorkerGuidance();
     await loadCache(cfg.course_plans || {});
-    await pollReviewAndProgress();
+    await pollReview();
     window.BnuToolBoxBnuSave = function () {
       return save(true, false, true);
     };
-    progressTimer = setInterval(pollReviewAndProgress, 700);
+    reviewTimer = setInterval(pollReview, 700);
     try {
       var data = await Z.api("plugins");
       var plugin = (data.plugins || []).find(function (item) {
@@ -990,7 +897,7 @@
       }
     } catch (e) { /* Ignore startup state errors. */ }
     window.addEventListener("beforeunload", function () {
-      if (progressTimer) clearInterval(progressTimer);
+      if (reviewTimer) clearInterval(reviewTimer);
       stopCacheWatch();
       delete window.BnuToolBoxBnuSave;
     });
