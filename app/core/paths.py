@@ -25,6 +25,7 @@ LOG_DIR = DATA_DIR / "logs"
 RUNTIME_DIR = DATA_DIR / "runtime"
 PLUGIN_DATA_DIR = DATA_DIR / "plugins"
 INSTALLED_PLUGINS_DIR = DATA_DIR / "installed-plugins"
+UPDATE_DIR = DATA_DIR / "updates"
 
 
 def ensure_data_dirs() -> None:
@@ -35,6 +36,7 @@ def ensure_data_dirs() -> None:
         RUNTIME_DIR,
         PLUGIN_DATA_DIR,
         INSTALLED_PLUGINS_DIR,
+        UPDATE_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

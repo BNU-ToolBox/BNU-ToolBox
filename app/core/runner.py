@@ -18,7 +18,7 @@ from typing import Callable
 from .paths import LOG_DIR
 
 _ROOT = Path(__file__).resolve().parents[2]
-BUILTIN_PLUGINS_DIR = _ROOT / "plugins"
+PLUGIN_SDK_DIR = _ROOT / "plugins"
 
 
 def _plugin_python_executable() -> str:
@@ -37,8 +37,8 @@ PLUGIN_BOOTSTRAP = (
     "entry=os.path.abspath(sys.argv[1]);"
     "plugin_dir=os.path.dirname(entry);"
     "plugins_dir=os.path.dirname(plugin_dir);"
-    "builtins_dir=os.path.abspath(sys.argv[2]);"
-    "sys.path[:0]=[plugin_dir,plugins_dir,builtins_dir];"
+    "sdk_dir=os.path.abspath(sys.argv[2]);"
+    "sys.path[:0]=[plugin_dir,plugins_dir,sdk_dir];"
     "sys.argv=[entry]+sys.argv[3:];"
     "runpy.run_path(entry,run_name='__main__')"
 )
@@ -343,7 +343,7 @@ class Runner:
                     [
                         PYTHON_EXE, "-c", PLUGIN_BOOTSTRAP,
                         str(entry_path),
-                        str(BUILTIN_PLUGINS_DIR),
+                        str(PLUGIN_SDK_DIR),
                         "--config", str(config_path),
                         "--datadir", str(data_dir),
                     ],

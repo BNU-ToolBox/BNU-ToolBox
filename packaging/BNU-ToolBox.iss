@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.0.3"
+  #define AppVersion "0.1.0"
 #endif
 #ifndef StageDir
   #define StageDir "..\build\stage"
@@ -50,7 +50,7 @@ Name: "{autodesktop}\BNU-ToolBox"; Filename: "{app}\runtime\pythonw.exe"; Parame
 Filename: "{app}\runtime\pythonw.exe"; Parameters: """{app}\app\main.py"""; WorkingDir: "{app}"; Description: "启动 BNU-ToolBox"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{app}\runtime\python.exe"; Parameters: """{app}\plugins\campus-network-auth\autostart.py"" --uninstall"; WorkingDir: "{app}"; RunOnceId: "RemoveCampusNetworkAutostart"; Flags: runhidden
+Filename: "{sys}\reg.exe"; Parameters: "DELETE ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ""BNU-ToolBox-CampusNetworkAuth"" /f"; RunOnceId: "RemoveCampusNetworkAutostart"; Flags: runhidden
 
 [Code]
 function EdgeInstalled(): Boolean;

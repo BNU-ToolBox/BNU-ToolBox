@@ -10,11 +10,8 @@ BNU-ToolBox 是面向北师大校园学习场景的 Windows 11 桌面工具箱�
 
 ## 功能
 
-| 插件 | 功能 |
-|---|---|
-| 教务抢课 | 按专业获取课程目录，持续轮询课程名额并自动提交。 |
-| BNU刷课 | 统一管理师道云与 SPOC 课程，支持并行获取课程详情、混合并发刷课、测试与互动任务。 |
-| 校园网认证 | 通过固定认证入口完成校园网认证，可配置独立开机自启。 |
+插件从在线目录安装，并由各自的 GitHub Release 独立发布和更新。当前目录提供教务抢课、
+BNU刷课和校园网认证；也可继续使用 zip 包安装其他插件。
 
 ## 安装
 
@@ -28,9 +25,10 @@ BNU-ToolBox 是面向北师大校园学习场景的 Windows 11 桌面工具箱�
 和桌面快捷方式。首次启动后：
 
 1. 在“全局设置”中填写北师大统一身份认证账号。
-2. 在校园网认证插件中填写独立的校园网账号和认证地址。
-3. 打开目标插件的“配置”页完成设置，再启动任务。
-4. 在“运行”页查看任务流程、总进度、剩余时间和并行进程状态。
+2. 打开“插件管理”，从在线目录安装所需插件。
+3. 在校园网认证插件中填写独立的校园网账号和认证地址。
+4. 打开目标插件的“配置”页完成设置，再启动任务。
+5. 在“运行”页查看任务流程、总进度、剩余时间和并行进程状态。
 
 系统必须已安装 Microsoft Edge。应用会自动读取 Edge 版本，并从微软官方服务下载匹配
 版本的 Edge WebDriver。
@@ -43,6 +41,21 @@ BNU-ToolBox 是面向北师大校园学习场景的 Windows 11 桌面工具箱�
 - 缓存位于当前用户数据目录，不写入安装目录。
 - 驱动版本不匹配时自动下载对应版本。
 - 可在“全局设置”中点击“检测并更新驱动”手动触发。
+
+## 自动更新
+
+主程序启动后会检查 GitHub Release。启用主程序自动更新时，程序会下载最新安装包、
+校验 SHA-256，并在 Windows 管理员授权后静默安装和重新启动。
+
+插件更新策略可在“全局设置”中选择：
+
+- 自动更新：启动后安装所有兼容更新。
+- 确认后更新：显示可更新插件，由用户确认。
+- 从不自动更新：仅保留手动“更新”按钮。
+
+插件版本、主程序最低版本和下载地址来自
+[BNUToolboxPlugins](https://github.com/BNU-ToolBox/BNUToolboxPlugins) 索引及其指向的
+独立插件仓库。
 
 ## 用户数据
 
@@ -60,6 +73,7 @@ global.json
 logs\
 plugins\
 installed-plugins\
+updates\
 runtime\msedgedriver\
 ```
 
@@ -92,13 +106,13 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 1. 创建隔离的 `build/` 目录。
 2. 复制 CPython 运行时。
 3. 安装锁定依赖到运行时目录。
-4. 复制应用、内置插件和静态前端。
+4. 复制应用、插件 SDK 和静态前端。
 5. 调用 Inno Setup 生成安装包。
 
 产物：
 
 ```text
-dist\installer\BNU-ToolBox-Setup-0.0.3.exe
+dist\installer\BNU-ToolBox-Setup-0.1.0.exe
 ```
 
 ## 项目结构
@@ -110,10 +124,7 @@ app/
   api.py            本地 API
   main.py           应用入口
 plugins/
-  _sdk/             插件 SDK
-  bdata-autoplay/   BNU刷课
-  campus-network-auth/
-  course-grab/
+  _sdk/             宿主插件 SDK；具体插件从在线目录安装
 packaging/           安装包构建脚本和 Inno Setup 配置
 ```
 

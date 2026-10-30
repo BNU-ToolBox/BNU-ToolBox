@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Annotated
 import uuid
 from pathlib import Path
@@ -18,9 +19,11 @@ from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect,
 from .core.config_store import GlobalConfig, PluginConfigStore
 from .core import course_cache
 from .core.edge_driver import edge_status, ensure_edge_driver
-from .core.plugin_manager import PluginManager, PluginError, PLUGINS_DIR
+from .core.app_updater import app_updater
+from .core.plugin_catalog import PluginCatalog
+from .core.plugin_manager import PluginManager, PluginError
 from .core.resources import resource_profile
-from .core.runner import Runner, get_bus
+from .core.runner import PLUGIN_SDK_DIR, Runner, get_bus
 from .version import __version__
 
 api_router = APIRouter(prefix="/api")
@@ -28,6 +31,7 @@ api_router = APIRouter(prefix="/api")
 global_config = GlobalConfig()
 runner = Runner()
 pm = PluginManager(runner)
+plugin_catalog = PluginCatalog(pm)
 _BDATA_ID = "bdata-autoplay"
 _CAMPUS_AUTH_ID = "campus-network-auth"
 
@@ -174,6 +178,29 @@ def list_plugins():
     return {"plugins": pm.list_plugins()}
 
 
+@api_router.get("/plugins/catalog")
+def list_plugin_catalog(refresh: bool = False):
+    try:
+        return plugin_catalog.list_catalog(force=refresh)
+    except Exception as exc:
+        raise HTTPException(502, f"无法获取插件目录: {exc}") from exc
+
+
+@api_router.post("/plugins/catalog/{plugin_id}/install")
+def install_catalog_plugin(plugin_id: str, body: dict | None = None):
+    update = bool((body or {}).get("update", False))
+    try:
+        result = plugin_catalog.install(plugin_id, update=update)
+        get_bus().publish({
+            "type": "plugin_installed",
+            "plugin": plugin_id,
+            "updated": update,
+        })
+        return result
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @api_router.get("/system/edge")
 def get_edge_status():
     return edge_status()
@@ -187,6 +214,26 @@ def get_system_info():
         "platform": "Windows 11 x64",
         "browser": "Microsoft Edge",
     }
+
+
+@api_router.get("/system/app-update")
+def get_app_update():
+    return app_updater.snapshot()
+
+
+@api_router.post("/system/app-update/check")
+def check_app_update():
+    return app_updater.check()
+
+
+@api_router.post("/system/app-update/install")
+def install_app_update():
+    try:
+        result = app_updater.download_and_launch()
+    except Exception as exc:
+        raise HTTPException(500, f"主程序更新失败: {exc}") from exc
+    _schedule_update_exit()
+    return result
 
 
 @api_router.get("/system/resources")
@@ -302,7 +349,7 @@ def start_plugin(plugin_id: str):
     entry = (plugin_dir / plugin["entry"]).resolve()
     if not entry.is_relative_to(plugin_dir):
         raise HTTPException(400, "插件入口文件不在插件目录内")
-    env_extra = {"PYTHONPATH": str(PLUGINS_DIR)}
+    env_extra = {"PYTHONPATH": str(PLUGIN_SDK_DIR)}
     try:
         runner.start(plugin_id, entry, effective, data_dir, env_extra=env_extra)
     except RuntimeError as e:
@@ -405,7 +452,7 @@ def refresh_bdata_tasks(plugin_id: str):
     try:
         runner.start(
             plugin_id, entry, effective, data_dir,
-            env_extra={"PYTHONPATH": str(PLUGINS_DIR)},
+            env_extra={"PYTHONPATH": str(PLUGIN_SDK_DIR)},
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -427,13 +474,23 @@ def _campus_autostart_script(plugin_id: str) -> Path:
 
 
 def _run_campus_autostart(script: Path, action: str) -> dict:
+    host_root = Path(__file__).resolve().parents[1]
+    plugin_data_dir = pm.plugin_data_dir(_CAMPUS_AUTH_ID)
+    env = os.environ.copy()
+    env["BNU_TOOLBOX_HOME"] = str(host_root)
+    env["BNU_TOOLBOX_PLUGIN_DATA_DIR"] = str(plugin_data_dir)
     try:
         result = subprocess.run(
-            [sys.executable, str(script), action],
+            [
+                sys.executable, str(script), action,
+                "--home", str(host_root),
+                "--data-dir", str(plugin_data_dir),
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             creationflags=(
                 subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
             timeout=30,
@@ -568,7 +625,7 @@ def _start_grab_task(task: str, extra: dict) -> None:
     entry = (plugin_dir / plugin["entry"]).resolve()
     if not entry.is_relative_to(plugin_dir):
         raise HTTPException(400, "插件入口文件不在插件目录内")
-    env_extra = {"PYTHONPATH": str(PLUGINS_DIR)}
+    env_extra = {"PYTHONPATH": str(PLUGIN_SDK_DIR)}
     try:
         runner.start(_GRAB_ID, entry, effective, data_dir, env_extra=env_extra)
     except RuntimeError as e:
@@ -647,6 +704,75 @@ async def update_global(body: dict):
     patch = _restore_masked_secrets(_config_patch(body), global_config.get())
     global_config.update(patch)
     return {"ok": True}
+
+
+def _schedule_update_exit() -> None:
+    def _exit_for_update() -> None:
+        time.sleep(1.5)
+        for plugin_id in list(runner.snapshot().keys()):
+            try:
+                runner.stop(plugin_id)
+            except Exception:
+                pass
+        os._exit(0)
+
+    threading.Thread(target=_exit_for_update, daemon=True).start()
+
+
+_maintenance_started = False
+
+
+def _is_packaged_runtime() -> bool:
+    return Path(sys.executable).parent.name.casefold() == "runtime"
+
+
+def _startup_maintenance() -> None:
+    global _maintenance_started
+    if _maintenance_started:
+        return
+    _maintenance_started = True
+    time.sleep(4)
+    settings = global_config.get().get("general", {})
+    app_state = app_updater.check()
+    get_bus().publish({"type": "app_update", **app_state})
+    if (
+        app_state.get("available")
+        and settings.get("auto_app_update", True)
+        and _is_packaged_runtime()
+    ):
+        try:
+            app_updater.download_and_launch()
+            _schedule_update_exit()
+            return
+        except Exception as exc:
+            get_bus().publish({
+                "type": "app_update",
+                **app_updater.snapshot(),
+                "message": f"自动更新失败: {exc}",
+            })
+    if settings.get("plugin_update_mode", "auto") != "auto":
+        return
+    try:
+        updated = plugin_catalog.auto_update_installed()
+        if updated:
+            get_bus().publish({
+                "type": "plugin_catalog_updated",
+                "updated": updated,
+            })
+    except Exception as exc:
+        get_bus().publish({
+            "type": "plugin_catalog_error",
+            "message": f"自动更新插件失败: {exc}",
+        })
+
+
+@api_router.on_event("startup")
+def schedule_startup_maintenance() -> None:
+    threading.Thread(
+        target=_startup_maintenance,
+        daemon=True,
+        name="startup-maintenance",
+    ).start()
 
 
 # ---------------- WebSocket ----------------

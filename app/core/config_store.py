@@ -234,6 +234,8 @@ GLOBAL_DEFAULTS: dict = {
         "headless_default": True,
         "default_speedup": 3.0,
         "cookie_life_days": 7,
+        "plugin_update_mode": "auto",
+        "auto_app_update": True,
     },
 }
 

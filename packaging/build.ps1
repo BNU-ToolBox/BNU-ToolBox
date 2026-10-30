@@ -74,6 +74,10 @@ $PythonExe = (& cmd /c "$PythonLauncher -c `"import sys;print(sys.executable)`""
 if (-not (Test-Path -LiteralPath $PythonExe)) {
     throw "Python launcher did not resolve to an executable: $PythonLauncher"
 }
+$PythonMajorMinor = (& cmd /c "$PythonLauncher -c `"import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')`"").Trim()
+if ($PythonMajorMinor -ne "3.13") {
+    throw "Build Python must be 3.13 for the embedded runtime; got $PythonMajorMinor ($PythonExe)"
+}
 
 & $PythonExe -m pip install `
     --disable-pip-version-check `

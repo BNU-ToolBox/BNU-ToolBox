@@ -35,7 +35,15 @@
     page: "dashboard",            // dashboard | plugins | settings | detail
     detailId: null,
     plugins: [],
+    catalog: [],
+    catalogLoading: false,
+    catalogError: "",
+    catalogStale: false,
+    catalogUpdatedAt: "",
+    pluginAction: "",
+    promptedPluginUpdates: false,
     globalConfig: null,
+    appUpdate: null,
     wsConnected: false,
     themeMode: localStorage.getItem("bnu-toolbox-theme") || "system",
     progress: {},                 // pluginId -> {done,total,workers,...}
@@ -126,6 +134,18 @@
       }
     } else if (msg.type === "plugin_installed" || msg.type === "plugin_uninstalled") {
       loadPlugins();
+      if (state.page === "plugins") loadCatalog(false);
+    } else if (msg.type === "plugin_catalog_updated") {
+      loadPlugins();
+      loadCatalog(true);
+      const updated = Array.isArray(msg.updated) ? msg.updated : [];
+      if (updated.length) {
+        El.ElMessage.success("已自动更新 " + updated.length + " 个插件");
+      }
+    } else if (msg.type === "app_update") {
+      state.appUpdate = Object.assign({}, state.appUpdate || {}, msg);
+    } else if (msg.type === "plugin_catalog_error") {
+      state.catalogError = msg.message || "插件目录更新失败";
     }
   }
 
@@ -164,6 +184,44 @@
       if (p.progress && !state.stoppingPlugins[p.id]) {
         state.progress[p.id] = p.progress;
       }
+    }
+  }
+
+  async function loadCatalog(force) {
+    state.catalogLoading = true;
+    state.catalogError = "";
+    try {
+      const data = await api("/plugins/catalog" + (force ? "?refresh=true" : ""));
+      state.catalog = data.plugins || [];
+      state.catalogStale = data.stale === true;
+      state.catalogUpdatedAt = data.updated_at || "";
+      if (data.error) state.catalogError = data.error;
+      const updates = state.catalog.filter((p) => p.update_available);
+      const mode = state.globalConfig
+        && state.globalConfig.general
+        && state.globalConfig.general.plugin_update_mode;
+      if (mode === "confirm" && updates.length && !state.promptedPluginUpdates) {
+        state.promptedPluginUpdates = true;
+        nextTick(() => promptPluginUpdates(updates));
+      }
+    } catch (e) {
+      state.catalogError = e.message;
+    } finally {
+      state.catalogLoading = false;
+    }
+  }
+
+  async function loadAppUpdate(check) {
+    try {
+      state.appUpdate = check
+        ? await api("/system/app-update/check", { method: "POST" })
+        : await api("/system/app-update");
+    } catch (e) {
+      state.appUpdate = {
+        status: "error",
+        current_version: state.appUpdate ? state.appUpdate.current_version : "",
+        message: e.message,
+      };
     }
   }
 
@@ -274,6 +332,8 @@
         connectWS();
         await loadPlugins();
         await loadGlobal();
+        await loadCatalog(false);
+        await loadAppUpdate(false);
         await loadEdgeStatus();
         await loadResources();
       });
@@ -286,8 +346,16 @@
       const statusTagType = (p) =>
         p.running ? "success" : (p.status === "crashed" ? "danger" : "info");
 
+      const pluginVersionLabel = (p) => {
+        if (!p.installed) return "— → v" + (p.latest ? p.latest.version : "?");
+        const installed = "v" + (p.installed_version || "?");
+        if (!p.latest || !p.update_available) return installed;
+        return installed + " → v" + p.latest.version;
+      };
+
       async function refresh() {
         await loadPlugins();
+        if (state.page === "plugins") await loadCatalog(false);
       }
 
       async function loadEdgeStatus() {
@@ -431,6 +499,98 @@
           El.ElMessage.success("已删除");
           await refresh();
         } catch (e) { El.ElMessage.error(e.message); }
+      }
+
+      async function installCatalogPlugin(p, update) {
+        const verb = update ? "更新" : "安装";
+        try {
+          await El.ElMessageBox.confirm(
+            "确定" + verb + "插件「" + p.name + "」吗？",
+            verb + "插件",
+            { type: "info", confirmButtonText: verb, cancelButtonText: "取消" }
+          );
+        } catch (e) { return; }
+        state.pluginAction = p.id;
+        try {
+          const result = await post(
+            "/plugins/catalog/" + encodeURIComponent(p.id) + "/install",
+            { update: !!update }
+          );
+          El.ElMessage.success(
+            "已" + verb + " " + result.name + " v" + result.version);
+          await loadPlugins();
+          await loadCatalog(true);
+        } catch (e) {
+          El.ElMessage.error(e.message);
+        } finally {
+          state.pluginAction = "";
+        }
+      }
+
+      async function promptPluginUpdates(updates) {
+        try {
+          await El.ElMessageBox.confirm(
+            "发现 " + updates.length + " 个插件可更新：" +
+            updates.map((p) => p.name + " v" + p.latest.version).join("、") +
+            "。是否立即安装？",
+            "插件更新",
+            { type: "info", confirmButtonText: "全部更新", cancelButtonText: "稍后" }
+          );
+        } catch (e) { return; }
+        await updateAllPlugins();
+      }
+
+      async function updateAllPlugins() {
+        const updates = state.catalog.filter((p) => p.update_available);
+        if (!updates.length) return;
+        state.pluginAction = "all";
+        let failed = 0;
+        for (const p of updates) {
+          try {
+            await post(
+              "/plugins/catalog/" + encodeURIComponent(p.id) + "/install",
+              { update: true }
+            );
+          } catch (e) {
+            failed += 1;
+          }
+        }
+        state.pluginAction = "";
+        await loadPlugins();
+        await loadCatalog(true);
+        if (failed) El.ElMessage.warning(failed + " 个插件更新失败");
+        else El.ElMessage.success("插件已全部更新");
+      }
+
+      async function checkAppUpdate() {
+        state.pluginAction = "app-update-check";
+        await loadAppUpdate(true);
+        state.pluginAction = "";
+        const info = state.appUpdate || {};
+        if (info.status === "error") El.ElMessage.error(info.message);
+        else if (info.available) El.ElMessage.warning(info.message);
+        else El.ElMessage.success(info.message || "当前已是最新版本");
+      }
+
+      async function installAppUpdate() {
+        const info = state.appUpdate || {};
+        if (!info.available) return;
+        try {
+          await El.ElMessageBox.confirm(
+            "将下载并安装 BNU-ToolBox " + info.latest_version +
+            "。安装期间应用会关闭，随后自动重新启动；Windows 可能要求管理员授权。",
+            "安装主程序更新",
+            { type: "warning", confirmButtonText: "下载并安装", cancelButtonText: "取消" }
+          );
+        } catch (e) { return; }
+        state.pluginAction = "app-update-install";
+        try {
+          await api("/system/app-update/install", { method: "POST" });
+          El.ElMessage.info("安装程序已启动，应用即将重启");
+        } catch (e) {
+          El.ElMessage.error(e.message);
+          state.pluginAction = "";
+        }
       }
 
       function triggerInstall() {
@@ -757,6 +917,8 @@
 
       watch(() => state.page, (page) => {
         if (page === "settings") loadEdgeStatus();
+        if (page === "plugins") loadCatalog(false);
+        if (page === "settings") loadAppUpdate(false);
       });
 
       return {
@@ -766,6 +928,8 @@
         workerTagType, fmtDur, fmtEta, fmtEtaClock,
         startPlugin, stopPlugin, saveDetailConfig, saveGlobal,
         uninstallPlugin, triggerInstall, onZipChosen,
+        installCatalogPlugin, updateAllPlugins, checkAppUpdate, installAppUpdate,
+        pluginVersionLabel,
         addCourseRow, removeCourseRow, setThemeMode, refresh,
         loadEdgeStatus, updateEdgeDriver, Icons,
       };
@@ -819,7 +983,6 @@
                 <el-icon><magic-stick /></el-icon>
               </div>
               <span>{{ p.name }}</span>
-              <el-tag v-if="p.builtin" size="small" type="warning" effect="plain">内置</el-tag>
             </div>
             <el-tooltip :content="statusText(p)" placement="top">
               <span class="running-dot" v-if="p.running"></span>
@@ -848,11 +1011,11 @@
     <template v-if="state.page==='plugins'">
       <div class="page-header">
         <h1>插件管理</h1>
-        <p>安装 zip 插件包,或管理已安装插件</p>
+        <p>从在线目录安装插件，或使用 zip 包离线安装</p>
       </div>
       <div class="panel">
-        <h2><el-icon><upload /></el-icon> 安装插件</h2>
-        <el-button type="primary" :loading="state.installing" @click="triggerInstall">
+        <h2><el-icon><upload /></el-icon> 本地安装</h2>
+        <el-button :loading="state.installing" @click="triggerInstall">
           <el-icon style="margin-right:4px"><upload /></el-icon>上传插件 zip 包
         </el-button>
         <span class="form-hint" style="margin-left:12px">
@@ -860,27 +1023,80 @@
         </span>
       </div>
       <div class="panel">
-        <h2><el-icon><box /></el-icon> 已安装</h2>
-        <el-table :data="state.plugins" style="width:100%">
-          <el-table-column prop="name" label="名称" min-width="140">
+        <div class="catalog-heading">
+          <h2><el-icon><box /></el-icon> 插件目录</h2>
+          <div class="catalog-actions">
+            <span class="form-hint" v-if="state.catalogUpdatedAt">
+              更新于 {{ state.catalogUpdatedAt }}
+            </span>
+            <el-button size="small" :loading="state.catalogLoading" @click="loadCatalog(true)">
+              刷新目录
+            </el-button>
+            <el-button
+              v-if="state.catalog.some(p => p.update_available)"
+              size="small"
+              type="primary"
+              :loading="state.pluginAction==='all'"
+              @click="updateAllPlugins">
+              全部更新
+            </el-button>
+          </div>
+        </div>
+        <el-alert
+          v-if="state.catalogError"
+          :title="state.catalogError"
+          :type="state.catalogStale ? 'warning' : 'error'"
+          :closable="false"
+          show-icon
+          style="margin-bottom:12px" />
+        <el-table v-loading="state.catalogLoading" :data="state.catalog" style="width:100%">
+          <el-table-column label="插件" min-width="230">
             <template #default="scope">
-              {{ scope.row.name }}
-              <el-tag v-if="scope.row.builtin" size="small" type="warning" effect="plain">内置</el-tag>
+              <div class="catalog-name">
+                <strong>{{ scope.row.name }}</strong>
+                <el-tag v-if="scope.row.local_only" size="small" type="info" effect="plain">本地</el-tag>
+                <el-tag v-if="scope.row.update_available" size="small" type="warning" effect="plain">可更新</el-tag>
+              </div>
+              <div class="form-hint">{{ scope.row.description }}</div>
             </template>
           </el-table-column>
-          <el-table-column prop="id" label="ID" min-width="120" />
-          <el-table-column prop="version" label="版本" width="80" />
-          <el-table-column label="状态" width="110">
+          <el-table-column label="版本" width="120">
+            <template #default="scope">{{ pluginVersionLabel(scope.row) }}</template>
+          </el-table-column>
+          <el-table-column label="依赖" width="130">
             <template #default="scope">
-              <el-tag :type="statusTagType(scope.row)" size="small">{{ statusText(scope.row) }}</el-tag>
+              <span v-if="scope.row.dependency">宿主 {{ scope.row.dependency }}+</span>
+              <span v-else class="form-hint">—</span>
+              <el-tag v-if="scope.row.installed && !scope.row.compatible" size="small" type="danger">不兼容</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="260">
+          <el-table-column label="安装状态" width="120">
             <template #default="scope">
-              <el-button v-if="!scope.row.running" size="small" type="primary" @click="startPlugin(scope.row.id)">启动</el-button>
-              <el-button v-else size="small" type="danger" plain @click="stopPlugin(scope.row.id)">停止</el-button>
-              <el-button size="small" @click="openDetailById(scope.row.id)">详情</el-button>
-              <el-button size="small" type="danger" plain :disabled="scope.row.builtin" @click="uninstallPlugin(scope.row)">删除</el-button>
+              <el-tag v-if="!scope.row.installed" size="small" type="info">未安装</el-tag>
+              <el-tag v-else :type="statusTagType(scope.row)" size="small">{{ statusText(scope.row) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="360">
+            <template #default="scope">
+              <el-button
+                v-if="!scope.row.installed"
+                size="small"
+                type="primary"
+                :disabled="!scope.row.compatible || !scope.row.latest"
+                :loading="state.pluginAction===scope.row.id"
+                @click="installCatalogPlugin(scope.row, false)">安装</el-button>
+              <template v-else>
+                <el-button
+                  v-if="scope.row.update_available"
+                  size="small"
+                  type="primary"
+                  :loading="state.pluginAction===scope.row.id"
+                  @click="installCatalogPlugin(scope.row, true)">更新</el-button>
+                <el-button v-if="!scope.row.running" size="small" @click="startPlugin(scope.row.id)">启动</el-button>
+                <el-button v-else size="small" type="danger" plain @click="stopPlugin(scope.row.id)">停止</el-button>
+                <el-button size="small" @click="openDetailById(scope.row.id)">详情</el-button>
+                <el-button size="small" type="danger" plain @click="uninstallPlugin(scope.row)">删除</el-button>
+              </template>
             </template>
           </el-table-column>
         </el-table>
@@ -949,6 +1165,49 @@
           </el-form-item>
           <el-form-item label="默认播放倍速">
             <el-input-number v-model="state.globalConfig.general.default_speedup" :min="1" :max="16" :step="0.5" />
+          </el-form-item>
+          <el-form-item label="插件更新策略">
+            <el-select v-model="state.globalConfig.general.plugin_update_mode" style="width:280px">
+              <el-option value="auto" label="自动更新" />
+              <el-option value="confirm" label="确认后更新" />
+              <el-option value="never" label="从不自动更新" />
+            </el-select>
+            <div class="form-hint">
+              自动更新会在启动后检查已安装插件；确认后更新会在打开插件管理页时询问。
+            </div>
+          </el-form-item>
+        </el-form>
+      </div>
+      <div class="panel">
+        <h2><el-icon><refresh /></el-icon> 主程序更新</h2>
+        <div class="update-summary">
+          <div>
+            <div class="update-version">
+              当前版本 v{{ (state.appUpdate && state.appUpdate.current_version) || "—" }}
+            </div>
+            <div class="form-hint">
+              {{ (state.appUpdate && state.appUpdate.message) || "尚未检查更新" }}
+            </div>
+          </div>
+          <div class="update-actions">
+            <el-button
+              size="small"
+              :loading="state.pluginAction==='app-update-check'"
+              @click="checkAppUpdate">检查更新</el-button>
+            <el-button
+              v-if="state.appUpdate && state.appUpdate.available"
+              size="small"
+              type="primary"
+              :loading="state.pluginAction==='app-update-install'"
+              @click="installAppUpdate">下载并安装 v{{ state.appUpdate.latest_version }}</el-button>
+          </div>
+        </div>
+        <el-form label-width="190px" style="max-width:720px;margin-top:14px">
+          <el-form-item label="自动安装主程序更新">
+            <el-switch v-model="state.globalConfig.general.auto_app_update" />
+            <div class="form-hint">
+              启动后自动检查、下载并校验 GitHub Release；安装时 Windows 可能显示管理员授权提示。
+            </div>
           </el-form-item>
         </el-form>
       </div>

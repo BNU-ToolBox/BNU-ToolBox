@@ -28,7 +28,7 @@ plugins/<plugin-id>/plugin.py
 
 ## 2. 插件目录与清单
 
-内置插件位于 `plugins/<plugin-id>/`。建议目录结构如下：
+插件是独立仓库，以 zip 安装包或在线目录形式分发。本地开发时建议采用如下目录结构：
 
 ```text
 plugins/
@@ -80,7 +80,8 @@ plugins/
 }
 ```
 
-插件 ID 会用于配置目录、数据目录和进程槽位，因此发布后不宜随意修改。内置插件 ID 受保护，用户插件不能覆盖。
+插件 ID 会用于配置目录、数据目录和进程槽位，因此发布后不宜随意修改。发布到在线目录前，
+还应在 `plugin.json` 中声明 `repository` 和 `host.min_version`。
 
 ## 3. 运行时协议
 
@@ -341,11 +342,34 @@ example-plugin.zip
 - ZIP 中必须恰好存在一个有效 `plugin.json`。
 - 不允许绝对路径或 `..` 路径。
 - 单个插件包最多 500 个文件，解压后最大 50 MB。
-- 插件 ID 不得与内置插件冲突。
+- 插件 ID 必须在在线索引中全局唯一。
 - 用户插件安装到 `%LOCALAPPDATA%\BNU-ToolBox\installed-plugins\<plugin-id>\`。
 - 删除用户插件不会自动删除其 `%LOCALAPPDATA%\BNU-ToolBox\plugins\<plugin-id>\` 数据。
 
 安装前应检查清单、入口代码和第三方依赖。插件以当前操作系统用户权限运行，具备读取本地文件和执行命令的能力。
+
+### 在线发布与版本元数据
+
+每个插件使用独立 GitHub 仓库。根目录的 `plugin-release.json` 是版本索引，至少包含
+插件 ID、仓库地址和按版本排列的列表。每个版本应记录：
+
+```json
+{
+  "version": "1.2.0",
+  "host_version": {"min": "0.1.0", "max": null},
+  "release_url": "https://github.com/<owner>/<repo>/releases/tag/v1.2.0",
+  "download_url": "https://github.com/<owner>/<repo>/releases/download/v1.2.0/example-plugin-1.2.0.zip",
+  "sha256": "<zip SHA-256>"
+}
+```
+
+发布顺序为：构建 zip、计算 SHA-256、更新元数据、提交并推送、创建同名 tag 和
+GitHub Release，最后上传 zip。`BNUToolboxPlugins` 仓库的 `plugins.json` 只保存插件
+摘要与 `plugin-release.json` 的 HTTPS 地址。BNU-ToolBox 会并行读取这些地址，因此不要
+把安装包提交进 Git。
+
+插件版本提高时，同时检查 `plugin.json` 与 `plugin-release.json` 是否一致。提高最低宿主
+版本后，旧版 BNU-ToolBox 会显示“不兼容”并拒绝安装。
 
 ## 10. 生命周期与故障处理
 

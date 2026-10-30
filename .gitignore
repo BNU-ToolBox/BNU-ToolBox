@@ -33,3 +33,5 @@ Driver_Notes/
 .env
 .env.*
 !.env.example
+
+BTPlugins

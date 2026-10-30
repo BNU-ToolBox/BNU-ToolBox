@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   installer:
     runs-on: windows-latest
@@ -27,9 +30,36 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass
           -File packaging\build.ps1 -PythonLauncher "python"
 
+      - name: Verify tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        run: |
+          $line = Get-Content app\version.py | Select-String '__version__\s*=\s*"([^"]+)"'
+          $version = $line.Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match app version $version"
+          }
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: BNU-ToolBox-Windows11
-          path: dist/installer/BNU-ToolBox-Setup-*.exe
+          path: |
+            dist/installer/BNU-ToolBox-Setup-*.exe
+            dist/installer/SHA256SUMS.txt
           if-no-files-found: error
+
+      - name: Publish GitHub prerelease
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          gh release create $env:GITHUB_REF_NAME `
+            "dist/installer/BNU-ToolBox-Setup-$version.exe" `
+            "dist/installer/SHA256SUMS.txt" `
+            --repo "${{ github.repository }}" `
+            --title "BNU-ToolBox $env:GITHUB_REF_NAME" `
+            --generate-notes `
+            --prerelease
