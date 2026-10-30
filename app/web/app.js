@@ -153,8 +153,25 @@
     } else if (msg.type === "app_update") {
       state.appUpdate = Object.assign({}, state.appUpdate || {}, msg);
       promptAppUpdateIfNeeded();
+      notifyAppUpdateState(msg);
     } else if (msg.type === "plugin_catalog_error") {
       state.catalogError = msg.message || "插件目录更新失败";
+    }
+  }
+
+  function notifyAppUpdateState(info) {
+    if (!info || !info.message) return;
+    const mode = state.globalConfig
+      && state.globalConfig.general
+      && state.globalConfig.general.main_update_mode;
+    if (info.status === "error") {
+      El.ElMessage.error(info.message, { duration: 8000 });
+    } else if (info.auto_update_deferred) {
+      El.ElMessage.warning(info.message, { duration: 8000 });
+    } else if (info.status === "available" && mode === "silent") {
+      El.ElMessage.info(
+        "发现新版本 v" + info.latest_version + "，正在准备自动更新",
+        { duration: 6000 });
     }
   }
 
@@ -172,7 +189,7 @@
         { type: "info", confirmButtonText: "下载并安装", cancelButtonText: "稍后" }
       );
       await api("/system/app-update/install", { method: "POST" });
-      El.ElMessage.info("安装程序已启动，应用即将重启");
+      El.ElMessage.info("请在 Windows 授权窗口中确认更新；授权前应用会保持运行");
     } catch (e) {
       if (e && e.message && !String(e.message).includes("cancel")) {
         El.ElMessage.error(e.message);
@@ -736,7 +753,7 @@
         state.pluginAction = "app-update-install";
         try {
           await api("/system/app-update/install", { method: "POST" });
-          El.ElMessage.info("安装程序已启动，应用即将重启");
+          El.ElMessage.info("请在 Windows 授权窗口中确认更新；授权前应用会保持运行");
         } catch (e) {
           El.ElMessage.error(e.message);
           state.pluginAction = "";

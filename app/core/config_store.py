@@ -239,6 +239,7 @@ GLOBAL_DEFAULTS: dict = {
         "cookie_life_days": 7,
         "plugin_update_mode": "auto",
         "main_update_mode": "silent",
+        "main_update_attempted_version": "",
         "edge_driver_update_mode": "exact",
     },
 }

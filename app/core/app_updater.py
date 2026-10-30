@@ -13,6 +13,7 @@ from pathlib import Path
 from .paths import UPDATE_DIR
 from .release_utils import (
     GithubRelease,
+    ReleaseAsset,
     ReleaseError,
     compare_versions,
     download_file,
@@ -34,7 +35,9 @@ class AppUpdater:
             "release_url": "",
             "message": "",
             "checked_at": "",
+            "waiting_for_elevation": False,
         }
+        self._status_path: Path | None = None
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -48,7 +51,7 @@ class AppUpdater:
             self._state.update(status="checking", message="正在检查主程序更新")
         try:
             releases = github_releases(APP_REPOSITORY)
-            candidates: list[tuple[GithubRelease, str]] = []
+            candidates: list[tuple[GithubRelease, ReleaseAsset]] = []
             for release in releases:
                 installer = next(
                     (
@@ -61,10 +64,10 @@ class AppUpdater:
                     None,
                 )
                 if installer:
-                    candidates.append((release, installer.url))
+                    candidates.append((release, installer))
             if not candidates:
                 raise ReleaseError("没有找到可用的安装包")
-            release, installer_url = candidates[0]
+            release, installer = candidates[0]
             available = compare_versions(release.version, __version__) > 0
             with self._lock:
                 self._state.update(
@@ -78,7 +81,8 @@ class AppUpdater:
                     ),
                     checked_at=time.strftime("%Y-%m-%d %H:%M:%S"),
                     _release=release,
-                    _installer_url=installer_url,
+                    _installer=installer,
+                    _installer_url=installer.url,
                 )
             return self.snapshot()
         except ReleaseError as exc:
@@ -94,11 +98,15 @@ class AppUpdater:
     def download_and_launch(self) -> dict:
         with self._lock:
             release = self._state.get("_release")
-            installer_url = self._state.get("_installer_url")
-            if not isinstance(release, GithubRelease) or not installer_url:
+            installer = self._state.get("_installer")
+            if not isinstance(release, GithubRelease) or not isinstance(
+                    installer, ReleaseAsset):
                 raise ReleaseError("请先检查更新")
+            if self._state.get("status") in {
+                    "downloading", "waiting_for_elevation", "installing"}:
+                raise ReleaseError("更新任务已经开始，请等待当前操作完成")
             self._state.update(status="downloading", message="正在下载安装包")
-        installer_name = installer_url.rsplit("/", 1)[-1]
+        installer_name = installer.name
         destination = UPDATE_DIR / installer_name
         expected_sha = ""
         checksum_asset = next(
@@ -121,7 +129,7 @@ class AppUpdater:
             checksums.unlink(missing_ok=True)
         try:
             download_file(
-                installer_url,
+                installer.url,
                 destination,
                 expected_sha256=expected_sha,
                 max_bytes=250 * 1024 * 1024,
@@ -131,27 +139,58 @@ class AppUpdater:
             with self._lock:
                 self._state.update(status="error", message=f"下载安装包失败: {exc}")
             raise
-        helper = self._write_update_helper(destination)
+        self._status_path = UPDATE_DIR / (
+            f"update-{release.version}-{os.getpid()}-status.json")
+        self._status_path.unlink(missing_ok=True)
+        helper = self._write_update_helper(destination, self._status_path)
         flags = (
             subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
             if os.name == "nt" else 0
         )
-        subprocess.Popen(
-            [
-                "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
-                "-ExecutionPolicy", "Bypass", "-File", str(helper),
-            ],
-            close_fds=True,
-            creationflags=flags,
-        )
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden",
+                    "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                ],
+                close_fds=True,
+                creationflags=flags,
+            )
+        except Exception as exc:
+            with self._lock:
+                self._state.update(
+                    status="error", message=f"无法启动更新助手: {exc}")
+            raise
         with self._lock:
             self._state.update(
-                status="installing",
-                message="安装程序已启动，应用即将重启",
+                status="waiting_for_elevation",
+                message="等待 Windows 管理员授权，授权后将自动安装并重启",
+                waiting_for_elevation=True,
             )
         return self.snapshot()
 
-    def _write_update_helper(self, installer: Path) -> Path:
+    def pending_status_path(self) -> Path | None:
+        with self._lock:
+            return self._status_path
+
+    def mark_helper_failed(self, message: str) -> None:
+        with self._lock:
+            self._state.update(
+                status="error",
+                message=f"更新未完成: {message}",
+                waiting_for_elevation=False,
+            )
+
+    def mark_installing(self) -> None:
+        with self._lock:
+            self._state.update(
+                status="installing",
+                message="管理员授权已通过，正在安装更新",
+                waiting_for_elevation=False,
+            )
+
+    def _write_update_helper(
+        self, installer: Path, status_path: Path) -> Path:
         root = Path(__file__).resolve().parents[2]
         pythonw = Path(sys.executable)
         if pythonw.name.casefold() == "python.exe":
@@ -159,25 +198,40 @@ class AppUpdater:
             if candidate.is_file():
                 pythonw = candidate
         helper = Path(tempfile.gettempdir()) / f"BNU-ToolBox-update-{os.getpid()}.ps1"
+        log_path = UPDATE_DIR / "update.log"
 
         def quote(value: object) -> str:
             return "'" + str(value).replace("'", "''") + "'"
 
         helper.write_text(
-            "$ErrorActionPreference = 'SilentlyContinue'\n"
-            "Start-Sleep -Seconds 3\n"
+            "$ErrorActionPreference = 'Stop'\n"
             f"$installer = {quote(installer)}\n"
             f"$app = {quote(pythonw)}\n"
             f"$root = {quote(root)}\n"
             f"$main = {quote(root / 'app' / 'main.py')}\n"
-            "$process = Start-Process -FilePath $installer "
+            f"$status = {quote(status_path)}\n"
+            f"$log = {quote(log_path)}\n"
+            "function Write-Status([string]$State, [string]$Message) {\n"
+            "  @{status=$State; message=$Message; time=(Get-Date).ToString('o')} |\n"
+            "    ConvertTo-Json -Compress | Set-Content -LiteralPath $status -Encoding UTF8\n"
+            "  Add-Content -LiteralPath $log -Encoding UTF8 "
+            "-Value \"$(Get-Date -Format o) [$State] $Message\"\n"
+            "}\n"
+            "try {\n"
+            "  Write-Status 'waiting' '等待管理员授权'\n"
+            "  $process = Start-Process -FilePath $installer "
             "-ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"
             "'/CLOSEAPPLICATIONS','/FORCECLOSEAPPLICATIONS') "
             "-Verb RunAs -PassThru\n"
-            "$process.WaitForExit()\n"
-            "if ($process.ExitCode -eq 0) {\n"
+            "  Write-Status 'launched' '安装程序已启动'\n"
+            "  $process.WaitForExit()\n"
+            "  if ($process.ExitCode -ne 0) { "
+            "throw \"安装程序退出代码 $($process.ExitCode)\" }\n"
+            "  Write-Status 'completed' '安装完成'\n"
             "  Start-Process -FilePath $app -ArgumentList @($main) "
             "-WorkingDirectory $root\n"
+            "} catch {\n"
+            "  Write-Status 'failed' $_.Exception.Message\n"
             "}\n",
             encoding="utf-8-sig",
         )

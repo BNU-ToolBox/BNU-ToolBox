@@ -282,7 +282,7 @@ def install_app_update():
         result = app_updater.download_and_launch()
     except Exception as exc:
         raise HTTPException(500, f"主程序更新失败: {exc}") from exc
-    _schedule_update_exit()
+    _watch_update_helper(app_updater.pending_status_path())
     return result
 
 
@@ -824,17 +824,50 @@ async def update_global(body: dict):
     return {"ok": True}
 
 
-def _schedule_update_exit() -> None:
-    def _exit_for_update() -> None:
-        time.sleep(1.5)
-        for plugin_id in list(runner.snapshot().keys()):
-            try:
-                runner.stop(plugin_id)
-            except Exception:
-                pass
-        os._exit(0)
+def _watch_update_helper(status_path: Path | None) -> None:
+    """Exit only after UAC approval starts the installer; keep app on failure."""
+    if status_path is None:
+        return
 
-    threading.Thread(target=_exit_for_update, daemon=True).start()
+    def watch() -> None:
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            try:
+                state = _read_json_object(status_path)
+            except Exception:
+                state = None
+            status = str((state or {}).get("status") or "")
+            if status == "failed":
+                message = str(state.get("message") or "管理员授权被取消")
+                app_updater.mark_helper_failed(message)
+                get_bus().publish({
+                    "type": "app_update",
+                    **app_updater.snapshot(),
+                })
+                return
+            if status in {"launched", "completed"}:
+                app_updater.mark_installing()
+                get_bus().publish({
+                    "type": "app_update",
+                    **app_updater.snapshot(),
+                })
+                time.sleep(2)
+                for plugin_id in list(runner.snapshot().keys()):
+                    try:
+                        runner.stop(plugin_id)
+                    except Exception:
+                        pass
+                os._exit(0)
+            time.sleep(0.5)
+        app_updater.mark_helper_failed("等待管理员授权超时")
+        get_bus().publish({
+            "type": "app_update",
+            **app_updater.snapshot(),
+        })
+
+    threading.Thread(
+        target=watch, daemon=True, name="app-update-watcher",
+    ).start()
 
 
 _maintenance_started = False
@@ -863,16 +896,32 @@ def _startup_maintenance() -> None:
             and main_mode == "silent"
             and _is_packaged_runtime()
         ):
-            try:
-                app_updater.download_and_launch()
-                _schedule_update_exit()
-                return
-            except Exception as exc:
+            latest = str(app_state.get("latest_version") or "")
+            attempted = str(
+                settings.get("main_update_attempted_version") or "")
+            if latest and latest == attempted:
                 get_bus().publish({
                     "type": "app_update",
-                    **app_updater.snapshot(),
-                    "message": f"自动更新失败: {exc}",
+                    **app_state,
+                    "message": (
+                        f"版本 {latest} 的上次自动更新未完成，"
+                        "请在全局设置中手动安装"),
+                    "auto_update_deferred": True,
                 })
+            else:
+                try:
+                    app_updater.download_and_launch()
+                    global_config.update({
+                        "general": {"main_update_attempted_version": latest},
+                    })
+                    _watch_update_helper(app_updater.pending_status_path())
+                    return
+                except Exception as exc:
+                    get_bus().publish({
+                        "type": "app_update",
+                        **app_updater.snapshot(),
+                        "message": f"自动更新失败: {exc}",
+                    })
     if settings.get("plugin_update_mode", "auto") != "auto":
         return
     try:

@@ -205,7 +205,9 @@ def github_releases(repository: str) -> list[GithubRelease]:
         assets = tuple(
             ReleaseAsset(
                 name=str(asset.get("name") or ""),
-                url=str(asset.get("browser_download_url") or ""),
+                # The API endpoint streams binary data and avoids environments
+                # where github.com release pages are blocked or very slow.
+                url=str(asset.get("url") or ""),
                 size=int(asset.get("size") or 0),
             )
             for asset in item.get("assets", [])
