@@ -96,6 +96,8 @@ Copy-Item -LiteralPath (Join-Path $Root "plugins") `
 Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination $StageDir
 Copy-Item -LiteralPath (Join-Path $Root "THIRD_PARTY_NOTICES.md") `
     -Destination $StageDir
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "DISCLAIMER_ZH.txt") `
+    -Destination $StageDir
 Copy-Item -LiteralPath (Join-Path $Root "start.bat") -Destination $StageDir
 
 $PythonLicense = Join-Path $RuntimeDir "LICENSE.txt"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,11 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.api import api_router, set_shutdown_callback  # noqa: E402
+from app.core.edge_driver import cleanup_edge_driver_cache  # noqa: E402
 from app.core.paths import (  # noqa: E402
     DATA_DIR,
     LOG_DIR,
     ensure_data_dirs,
     require_supported_platform,
+    trim_logs,
 )
 
 from fastapi import FastAPI  # noqa: E402
@@ -32,7 +35,11 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 WEB_DIR = ROOT / "app" / "web"
 INSTANCE_MUTEX = "Local\\BNU-ToolBox-Desktop"
-APP_WINDOW_PROFILE = DATA_DIR / "app-window-v2"
+APP_WINDOW_PROFILE = DATA_DIR / "app-window"
+LEGACY_APP_WINDOW_PROFILES = (
+    DATA_DIR / "app-window",
+    DATA_DIR / "app-window-v2",
+)
 
 
 def setup_consoleless_io() -> None:
@@ -98,7 +105,24 @@ def maximize_window_later(
     if os.name != "nt":
         return
     user32 = ctypes.windll.user32
+    icon_path = WEB_DIR / "assets" / "bnu-toolbox.ico"
     deadline = time.time() + timeout
+
+    def apply_window_icon(hwnd: int) -> None:
+        if not icon_path.is_file():
+            return
+        image_icon = 1
+        lr_load_from_file = 0x00000010
+        wm_seticon = 0x0080
+        for kind, metric in ((0, 49), (1, 11)):  # SM_CXSMICON, SM_CXICON
+            size = int(user32.GetSystemMetrics(metric))
+            icon = user32.LoadImageW(
+                None, str(icon_path), image_icon, size, size,
+                lr_load_from_file,
+            )
+            if icon:
+                user32.SendMessageW(hwnd, wm_seticon, kind, icon)
+
     while time.time() < deadline:
         matches: list[int] = []
 
@@ -117,6 +141,7 @@ def maximize_window_later(
         user32.EnumWindows(visit, 0)
         if matches:
             user32.ShowWindow(matches[-1], 3)  # SW_MAXIMIZE
+            apply_window_icon(matches[-1])
             return
         time.sleep(0.2)
 
@@ -138,8 +163,12 @@ def open_window_later(url: str) -> None:
                         [
                             exe,
                             f"--user-data-dir={APP_WINDOW_PROFILE}",
+                            "--app-id=bnu-toolbox",
                             "--app=" + url,
                             "--start-maximized",
+                            "--disk-cache-size=16777216",
+                            "--media-cache-size=16777216",
+                            "--disable-background-networking",
                         ],
                         creationflags=subprocess.DETACHED_PROCESS,
                     )
@@ -148,6 +177,18 @@ def open_window_later(url: str) -> None:
                 except OSError:
                     continue
         print("未检测到 Microsoft Edge，无法打开应用窗口", flush=True)
+
+
+def reset_app_window_profile() -> None:
+    """Drop legacy app-window profiles; the UI only needs transient state."""
+    data_root = DATA_DIR.resolve()
+    for profile in LEGACY_APP_WINDOW_PROFILES:
+        target = profile.resolve()
+        if target.parent != data_root:
+            continue
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+    APP_WINDOW_PROFILE.mkdir(parents=True, exist_ok=True)
 
 
 def acquire_single_instance():
@@ -174,11 +215,14 @@ def open_existing_instance() -> None:
 def main() -> None:
     require_supported_platform()
     ensure_data_dirs()
+    trim_logs()
     setup_consoleless_io()
     instance_handle = acquire_single_instance()
     if instance_handle is None:
         open_existing_instance()
         return
+    cleanup_edge_driver_cache()
+    reset_app_window_profile()
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-window", action="store_true", help="只启动服务,不开窗口")

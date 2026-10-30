@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 #ifndef StageDir
   #define StageDir "..\build\stage"
@@ -27,13 +27,18 @@ OutputBaseFilename=BNU-ToolBox-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+LanguageDetectionMethod=uilanguage
+ShowLanguageDialog=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.22000
 UninstallDisplayIcon={app}\app\web\assets\bnu-toolbox.ico
 SetupIconFile={#AppIcon}
-LicenseFile={#StageDir}\LICENSE
+LicenseFile={#SourcePath}\DISCLAIMER_ZH.txt
 SetupLogging=yes
+
+[Languages]
+Name: "chinesesimplified"; MessagesFile: "{#SourcePath}\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式:"

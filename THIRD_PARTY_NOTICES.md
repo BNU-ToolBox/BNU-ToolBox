@@ -1,5 +1,12 @@
 # Third-Party Notices
 
+## Inno Setup Chinese Simplified language file
+
+`packaging/ChineseSimplified.isl` is sourced from the official Inno Setup
+`issrc` translation resources and is distributed under the terms included in
+that file and the Inno Setup license. Source:
+https://github.com/jrsoftware/issrc/blob/main/Files/Languages/ChineseSimplified.isl
+
 BNU-ToolBox includes or interacts with third-party software. Their licenses
 apply independently of the project's MIT license.
 
@@ -61,6 +68,5 @@ installer's terms.
 
 ## Plugins
 
-Built-in plugins are part of this repository and are distributed under the
-project's MIT license unless a plugin states otherwise. Dynamically installed
-third-party plugins remain subject to their respective authors' license terms.
+Plugins are distributed from independent repositories and may use their own
+licenses. Installing a plugin does not change the license of its source code.

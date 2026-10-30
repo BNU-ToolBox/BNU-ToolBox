@@ -107,7 +107,12 @@ class AppUpdater:
         )
         if checksum_asset:
             checksums = UPDATE_DIR / f"{release.version}-SHA256SUMS.txt"
-            download_file(checksum_asset.url, checksums, max_bytes=1024 * 1024)
+            download_file(
+                checksum_asset.url,
+                checksums,
+                max_bytes=1024 * 1024,
+                accept="application/octet-stream",
+            )
             for line in checksums.read_text(encoding="utf-8").splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[1] == installer_name:
@@ -120,6 +125,7 @@ class AppUpdater:
                 destination,
                 expected_sha256=expected_sha,
                 max_bytes=250 * 1024 * 1024,
+                accept="application/octet-stream",
             )
         except Exception as exc:
             with self._lock:

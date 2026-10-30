@@ -178,6 +178,15 @@ html, body, #app {
 }
 .plugin-card .actions .el-button { flex: 1; }
 
+.plugin-download {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--bnu-toolbox-text-secondary);
+  font-size: 12px;
+}
+
 .running-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -208,6 +217,42 @@ html, body, #app {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.detail-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.account-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
+}
+.account-card {
+  margin-bottom: 0;
+}
+.account-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  font-size: 16px;
+}
+.account-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 /* ---------- 插件运行页 ---------- */
@@ -548,6 +593,25 @@ html, body, #app {
   font-weight: 700;
   color: var(--bnu-toolbox-text);
   margin-bottom: 4px;
+}
+.update-settings-form {
+  max-width: 980px;
+}
+.update-settings-form .el-form-item__content {
+  row-gap: 8px;
+}
+.update-current {
+  margin-left: 4px;
+  color: var(--bnu-toolbox-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.update-message {
+  margin-left: 170px;
+}
+@media (max-width: 900px) {
+  .account-list { grid-template-columns: 1fr; }
+  .update-message { margin-left: 0; }
 }
 @media (max-width: 760px) {
   .catalog-heading,

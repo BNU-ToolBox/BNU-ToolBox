@@ -1,6 +1,7 @@
 """GitHub release helpers shared by application and plugin updates."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -8,12 +9,13 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _USER_AGENT = "BNU-ToolBox-Updater"
 _ALLOWED_HOSTS = {
     "api.github.com",
     "github.com",
+    "cdn.jsdelivr.net",
     "objects.githubusercontent.com",
     "raw.githubusercontent.com",
 }
@@ -67,6 +69,31 @@ def fetch_json(url: str, timeout: float = 15.0) -> Any:
         raise ReleaseError(f"无法获取更新信息: {exc}") from exc
 
 
+def fetch_github_content(
+    repository: str,
+    path: str,
+    *,
+    ref: str = "main",
+    timeout: float = 8.0,
+) -> Any:
+    """Read a text/JSON file through GitHub's fast Contents API."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ReleaseError("GitHub 仓库名格式错误")
+    quoted_path = urllib.parse.quote(path.lstrip("/"))
+    payload = fetch_json(
+        f"https://api.github.com/repos/{repository}/contents/"
+        f"{quoted_path}?ref={urllib.parse.quote(ref)}",
+        timeout=timeout,
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
+        raise ReleaseError("GitHub 文件响应格式错误")
+    try:
+        raw = base64.b64decode(payload["content"], validate=False)
+        return json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"GitHub 文件内容解析失败: {exc}") from exc
+
+
 def download_file(
     url: str,
     destination: Path,
@@ -74,19 +101,27 @@ def download_file(
     expected_sha256: str = "",
     max_bytes: int = 250 * 1024 * 1024,
     timeout: float = 60.0,
+    progress_callback: Callable[[int, int], None] | None = None,
+    accept: str = "",
 ) -> Path:
     safe_url = require_https_github(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     digest = hashlib.sha256()
     total = 0
-    request = urllib.request.Request(
-        safe_url, headers={"User-Agent": _USER_AGENT})
+    headers = {"User-Agent": _USER_AGENT}
+    if accept:
+        headers["Accept"] = accept
+    request = urllib.request.Request(safe_url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response, open(
                 temporary, "wb") as output:
             if response.status != 200:
                 raise ReleaseError(f"下载失败: HTTP {response.status}")
+            try:
+                expected_total = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                expected_total = 0
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -96,6 +131,11 @@ def download_file(
                     raise ReleaseError("下载文件超过允许大小")
                 output.write(chunk)
                 digest.update(chunk)
+                if progress_callback:
+                    try:
+                        progress_callback(total, expected_total)
+                    except Exception:
+                        pass
         actual = digest.hexdigest()
         if expected_sha256 and actual.casefold() != expected_sha256.casefold():
             raise ReleaseError("文件校验失败，SHA-256 不匹配")
@@ -122,6 +162,29 @@ class GithubRelease:
     published_at: str
     prerelease: bool
     assets: tuple[ReleaseAsset, ...]
+
+
+def github_release_asset_url(
+    repository: str,
+    release_tag: str,
+    asset_name: str,
+) -> str:
+    """Resolve a release asset to the API endpoint that streams its bytes."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ReleaseError("GitHub 仓库名格式错误")
+    payload = fetch_json(
+        f"https://api.github.com/repos/{repository}/releases/tags/"
+        f"{urllib.parse.quote(release_tag, safe='')}",
+        timeout=8.0,
+    )
+    if not isinstance(payload, dict):
+        raise ReleaseError("GitHub Release 响应格式错误")
+    for asset in payload.get("assets", []):
+        if isinstance(asset, dict) and asset.get("name") == asset_name:
+            url = str(asset.get("url") or "")
+            require_https_github(url)
+            return url
+    raise ReleaseError(f"Release 中未找到资源: {asset_name}")
 
 
 def github_releases(repository: str) -> list[GithubRelease]:

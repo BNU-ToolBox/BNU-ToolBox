@@ -144,7 +144,7 @@ class _PluginLogWriter:
         logger.propagate = False
         handler = RotatingFileHandler(
             path,
-            maxBytes=5 * 1024 * 1024,
+            maxBytes=256 * 1024,
             backupCount=3,
             encoding="utf-8",
         )

@@ -17,6 +17,7 @@ EDGE_DRIVER_DIR = RUNTIME_DIR / "msedgedriver"
 EDGE_DRIVER_DOWNLOAD_BASE = "https://msedgedriver.microsoft.com"
 EDGE_DRIVER_FALLBACK_BASE = "https://msedgedriver.azureedge.net"
 _LOCK = threading.Lock()
+UPDATE_MODES = {"exact", "compatible", "prompt"}
 
 
 def _file_version(path: Path) -> str:
@@ -183,6 +184,7 @@ def _download_driver(version: str, log=None) -> Path:
                         temp_driver = Path(output.name)
                         shutil.copyfileobj(source, output)
             os.replace(temp_driver, target)
+            _prune_driver_versions(target_dir)
             return target
         except (requests.RequestException, OSError, RuntimeError,
                 zipfile.BadZipFile) as exc:
@@ -201,7 +203,56 @@ def _download_driver(version: str, log=None) -> Path:
     raise RuntimeError(f"EdgeDriver 下载失败: {last_error or '未知错误'}")
 
 
-def ensure_edge_driver(log=None, force: bool = False) -> Path:
+def _configured_update_mode() -> str:
+    try:
+        from .config_store import GlobalConfig
+
+        mode = GlobalConfig().get().get("general", {}).get(
+            "edge_driver_update_mode", "exact")
+        return mode if mode in UPDATE_MODES else "exact"
+    except Exception:
+        return "exact"
+
+
+def _prune_driver_versions(keep: Path) -> None:
+    """Remove all cached EdgeDriver versions except the active one."""
+    root = EDGE_DRIVER_DIR.resolve()
+    if keep.resolve().parent != root or not EDGE_DRIVER_DIR.is_dir():
+        return
+    for child in EDGE_DRIVER_DIR.iterdir():
+        if child.resolve() == keep.resolve():
+            continue
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        except OSError:
+            pass
+
+
+def cleanup_edge_driver_cache() -> None:
+    """Keep only the newest cached driver and remove obsolete version folders."""
+    status = edge_status()
+    driver_path = Path(status["driver_path"]) if status["driver_path"] else None
+    keep = driver_path.parent if driver_path else None
+    for child in EDGE_DRIVER_DIR.iterdir() if EDGE_DRIVER_DIR.is_dir() else ():
+        if keep and child.resolve() == keep.resolve():
+            continue
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        except OSError:
+            pass
+
+
+def ensure_edge_driver(
+    log=None,
+    force: bool = False,
+    update_mode: str | None = None,
+) -> Path:
     executable = find_edge_executable()
     if executable is None:
         raise RuntimeError("未检测到 Microsoft Edge，请确认 Windows 11 已安装 Edge")
@@ -211,8 +262,18 @@ def ensure_edge_driver(log=None, force: bool = False) -> Path:
     with _LOCK:
         status = edge_status()
         driver = Path(status["driver_path"]) if status["driver_path"] else None
-        if not force and status["exact_match"] and driver and driver.is_file():
-            return driver
+        mode = update_mode or _configured_update_mode()
+        if mode not in UPDATE_MODES:
+            mode = "exact"
+        if not force and driver and driver.is_file():
+            if status["exact_match"]:
+                return driver
+            if mode in {"compatible", "prompt"} and status["compatible"]:
+                return driver
+        if not force and mode == "prompt" and (
+                not driver or not status["compatible"]):
+            raise RuntimeError(
+                "EdgeDriver 与 Edge 版本不兼容，请在全局设置中更新 EdgeDriver")
         driver = _download_driver(edge_version, log=log)
         driver_version = _file_version(driver)
         if driver_version.split(".")[0] != edge_version.split(".")[0]:

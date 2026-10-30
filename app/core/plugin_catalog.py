@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 
 from .paths import CACHE_DIR, UPDATE_DIR
 from .plugin_manager import PluginError, PluginManager
@@ -14,16 +15,20 @@ from .release_utils import (
     ReleaseError,
     compare_versions,
     download_file,
+    fetch_github_content,
     fetch_json,
+    github_release_asset_url,
     minimum_host_satisfied,
     require_https_github,
     version_tuple,
 )
 from ..version import __version__
 
-PLUGIN_INDEX_URL = (
+PLUGIN_INDEX_URLS = (
+    "https://cdn.jsdelivr.net/gh/BNU-ToolBox/"
+    "BNUToolboxPlugins@main/plugins.json",
     "https://raw.githubusercontent.com/BNU-ToolBox/"
-    "BNUToolboxPlugins/main/plugins.json"
+    "BNUToolboxPlugins/main/plugins.json",
 )
 
 
@@ -48,7 +53,7 @@ class PluginCatalog:
         if snapshot is not None:
             return self._with_installed(snapshot, stale=False)
         try:
-            index = fetch_json(PLUGIN_INDEX_URL)
+            index = self._fetch_index()
             entries = self._validate_index(index)
             resolved = self._resolve_entries(entries)
             snapshot = {
@@ -66,6 +71,25 @@ class PluginCatalog:
             if cached is not None:
                 return self._with_installed(cached, stale=True, error=str(exc))
             raise
+
+    @staticmethod
+    def _fetch_index() -> Any:
+        last_error: ReleaseError | None = None
+        try:
+            return fetch_github_content(
+                "BNU-ToolBox/BNUToolboxPlugins",
+                "plugins.json",
+                ref="main",
+                timeout=8.0,
+            )
+        except ReleaseError as exc:
+            last_error = exc
+        for url in PLUGIN_INDEX_URLS:
+            try:
+                return fetch_json(url, timeout=5.0)
+            except ReleaseError as exc:
+                last_error = exc
+        raise last_error or ReleaseError("无法获取插件索引")
 
     def _validate_index(self, payload: Any) -> list[dict]:
         if not isinstance(payload, dict) or not isinstance(payload.get("plugins"), list):
@@ -112,7 +136,12 @@ class PluginCatalog:
         return results
 
     def _resolve_entry(self, entry: dict) -> dict:
-        metadata = fetch_json(str(entry["metadata_url"]))
+        embedded = entry.get("versions")
+        metadata = (
+            {**entry, "versions": embedded}
+            if isinstance(embedded, list)
+            else fetch_json(str(entry["metadata_url"]), timeout=8.0)
+        )
         if not isinstance(metadata, dict):
             raise ReleaseError("插件版本元数据格式错误")
         plugin_id = str(metadata.get("plugin_id") or entry.get("id") or "")
@@ -215,7 +244,13 @@ class PluginCatalog:
             "host_version": __version__,
         }
 
-    def install(self, plugin_id: str, *, update: bool = False) -> dict:
+    def install(
+        self,
+        plugin_id: str,
+        *,
+        update: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict:
         catalog = self.list_catalog(force=True)
         item = next(
             (plugin for plugin in catalog["plugins"] if plugin["id"] == plugin_id),
@@ -235,6 +270,19 @@ class PluginCatalog:
         if item.get("running"):
             raise PluginError("插件正在运行，请先停止")
         download_url = str(latest.get("download_url") or "")
+        repository = str(item.get("repository") or "")
+        repository_slug = urllib.parse.urlparse(repository).path.strip("/")
+        asset_name = download_url.rsplit("/", 1)[-1]
+        try:
+            download_url = github_release_asset_url(
+                repository_slug,
+                str(latest.get("release_tag") or ""),
+                asset_name,
+            )
+        except ReleaseError:
+            # Keep compatibility with mirrors that do not expose a Release
+            # asset API; the browser URL remains a valid fallback.
+            pass
         archive = UPDATE_DIR / "plugins" / f"{plugin_id}-{uuid.uuid4().hex}.zip"
         try:
             download_file(
@@ -242,6 +290,8 @@ class PluginCatalog:
                 archive,
                 expected_sha256=str(latest.get("sha256") or ""),
                 max_bytes=50 * 1024 * 1024,
+                progress_callback=progress,
+                accept="application/octet-stream",
             )
             result = self.manager.install(str(archive), replace=update)
             with self._lock:

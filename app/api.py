@@ -16,7 +16,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
 
-from .core.config_store import GlobalConfig, PluginConfigStore
+from .core.config_store import (
+    AccountSelectionStore,
+    GlobalConfig,
+    PluginConfigStore,
+)
 from .core import course_cache
 from .core.edge_driver import edge_status, ensure_edge_driver
 from .core.app_updater import app_updater
@@ -29,6 +33,7 @@ from .version import __version__
 api_router = APIRouter(prefix="/api")
 
 global_config = GlobalConfig()
+account_selections = AccountSelectionStore()
 runner = Runner()
 pm = PluginManager(runner)
 plugin_catalog = PluginCatalog(pm)
@@ -85,44 +90,32 @@ def _client_disconnected() -> None:
             _shutdown_timer.start()
 
 
-def _effective_plugin_config(plugin: dict, cfg: dict) -> dict:
-    """合并全局配置:插件账号留空时回退到全局统一身份认证账号。
-
-    合并结果同时写入 account 与顶层 username/password(插件运行时读取后者)。
-    BNU刷课固定使用全局账号,忽略旧版插件内保存的凭据。
-    校园网认证与统一身份认证无关,只使用插件自己的账号密码。
-    注意必须直接赋值而非 setdefault: 配置界面保存的 username/password 键总是
-    存在(留空=用全局, 存的是空串), setdefault 遇到空串占位不会覆盖,
-    会导致全局账号永远合并不进去。
-    """
+def _effective_plugin_config(
+    plugin: dict,
+    cfg: dict,
+    account_id: str = "",
+) -> dict:
+    """Inject the host-selected account into an isolated plugin config."""
     g = global_config.get()
     effective = dict(cfg)
-    src = effective.get("account")
-    if not isinstance(src, dict):
-        src = {}
-    plugin_username = src.get("username") or effective.get("username") or ""
-    plugin_password = src.get("password") or effective.get("password") or ""
-    if plugin.get("id") == _BDATA_ID:
-        # The unified BNU plugin always uses the global unified-auth account.
-        plugin_username = ""
-        plugin_password = ""
-    gsrc = g.get("account")
-    if not isinstance(gsrc, dict):
-        gsrc = {}
-    if plugin.get("id") == _CAMPUS_AUTH_ID:
-        # Campus-network credentials are intentionally separate from BNU CAS.
-        merged = {
-            "username": plugin_username,
-            "password": plugin_password,
-        }
-    else:
-        merged = {
-            "username": plugin_username or gsrc.get("username") or "",
-            "password": plugin_password or gsrc.get("password") or "",
-        }
+    selected_id = account_id or account_selections.get(plugin["id"])
+    account = global_config.resolve_account(selected_id)
+    username = str(account.get("username") or "")
+    password = (
+        str(account.get("campus_password") or "")
+        if plugin.get("id") == _CAMPUS_AUTH_ID
+        else str(account.get("password") or "")
+    )
+    merged = {
+        "id": str(account.get("id") or ""),
+        "nickname": str(account.get("nickname") or username),
+        "username": username,
+        "password": password,
+    }
     effective["account"] = merged
     effective["username"] = merged["username"]
     effective["password"] = merged["password"]
+    effective["account_nickname"] = merged["nickname"]
     general = effective.get("general")
     if not isinstance(general, dict):
         general = {}
@@ -154,6 +147,26 @@ def _restore_masked_secrets(patch: object, current: object) -> object:
     return patch
 
 
+def _restore_masked_accounts(patch: list, current: object) -> list:
+    """Merge account secrets by stable id so add/delete cannot shift passwords."""
+    current_by_id = {
+        str(item.get("id") or ""): item
+        for item in current
+        if isinstance(item, dict)
+    } if isinstance(current, list) else {}
+    restored = []
+    for item in patch:
+        if not isinstance(item, dict):
+            continue
+        account = dict(item)
+        old = current_by_id.get(str(account.get("id") or ""), {})
+        for key in ("password", "campus_password"):
+            if account.get(key) == "******" and old.get(key):
+                account[key] = old[key]
+        restored.append(account)
+    return restored
+
+
 def _config_patch(body: dict) -> dict:
     patch = body.get("config")
     if not isinstance(patch, dict):
@@ -175,7 +188,23 @@ def _strip_plugin_styles(html: str) -> str:
 
 @api_router.get("/plugins")
 def list_plugins():
-    return {"plugins": pm.list_plugins()}
+    plugins = pm.list_plugins()
+    for plugin in plugins:
+        plugin["selected_account_id"] = account_selections.get(plugin["id"])
+    return {"plugins": plugins}
+
+
+@api_router.put("/plugins/{plugin_id}/account")
+def select_plugin_account(plugin_id: str, body: dict):
+    try:
+        pm.get_plugin(plugin_id)
+    except PluginError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    account_id = str(body.get("account_id") or "").strip()
+    if account_id and not global_config.resolve_account(account_id).get("id"):
+        raise HTTPException(404, "账号不存在")
+    account_selections.set(plugin_id, account_id)
+    return {"ok": True, "account_id": account_id}
 
 
 @api_router.get("/plugins/catalog")
@@ -190,7 +219,28 @@ def list_plugin_catalog(refresh: bool = False):
 def install_catalog_plugin(plugin_id: str, body: dict | None = None):
     update = bool((body or {}).get("update", False))
     try:
-        result = plugin_catalog.install(plugin_id, update=update)
+        bus = get_bus()
+        last_percent = -1
+
+        def report(downloaded: int, total: int) -> None:
+            nonlocal last_percent
+            percent = (
+                min(100, int(downloaded * 100 / total))
+                if total > 0 else None
+            )
+            if percent == last_percent:
+                return
+            last_percent = percent
+            bus.publish({
+                "type": "plugin_download",
+                "plugin": plugin_id,
+                "downloaded": downloaded,
+                "total": total,
+                "percent": percent,
+            })
+
+        result = plugin_catalog.install(
+            plugin_id, update=update, progress=report)
         get_bus().publish({
             "type": "plugin_installed",
             "plugin": plugin_id,
@@ -250,6 +300,24 @@ def update_edge_driver():
     return {"ok": True, "status": edge_status(), "path": str(path)}
 
 
+@api_router.post("/system/edge/check")
+def check_edge_driver():
+    before = edge_status()
+    try:
+        path = ensure_edge_driver(log=print)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    after = edge_status()
+    return {
+        "ok": True,
+        "updated": (
+            before.get("driver_version") != after.get("driver_version")
+        ),
+        "status": after,
+        "path": str(path),
+    }
+
+
 @api_router.post("/plugins/install")
 async def install_plugin(file: Annotated[UploadFile, File()]):
     # 文件名完全由服务端生成, 不拼接客户端可控路径。
@@ -266,8 +334,28 @@ async def install_plugin(file: Annotated[UploadFile, File()]):
         tmp.unlink(missing_ok=True)
 
 
+@api_router.post("/system/open-logs")
+def open_logs_folder():
+    from .core.paths import LOG_DIR, ensure_data_dirs
+
+    ensure_data_dirs()
+    try:
+        os.startfile(str(LOG_DIR))
+    except OSError as exc:
+        raise HTTPException(500, f"无法打开日志文件夹: {exc}") from exc
+    return {"ok": True, "path": str(LOG_DIR)}
+
+
 @api_router.delete("/plugins/{plugin_id}")
 def uninstall_plugin(plugin_id: str):
+    if plugin_id == _CAMPUS_AUTH_ID:
+        try:
+            script = _campus_autostart_script(plugin_id)
+            _run_campus_autostart(script, "--uninstall")
+        except HTTPException:
+            # Deleting the plugin should still work if its autostart helper is
+            # already missing or the registry entry cannot be read.
+            pass
     try:
         pm.uninstall(plugin_id)
         get_bus().publish({"type": "plugin_uninstalled", "plugin": plugin_id})
@@ -283,6 +371,9 @@ def get_plugin_config(plugin_id: str):
     except PluginError as e:
         raise HTTPException(404, str(e)) from e
     cfg = PluginConfigStore(plugin_id).get_masked()
+    if plugin_id == _CAMPUS_AUTH_ID:
+        for key in ("username", "password", "campus_password", "account"):
+            cfg.pop(key, None)
     if plugin_id == _BDATA_ID and not cfg.get("workers"):
         cfg["workers"] = resource_profile().recommended_workers
     # 未配置过的字段用清单里的默认值填充,前端表单才有初始显示
@@ -327,12 +418,15 @@ async def save_plugin_config(plugin_id: str, body: dict):
     store = PluginConfigStore(plugin_id)
     old = store.get()
     new = _restore_masked_secrets(_config_patch(body), old)
+    if plugin_id == _CAMPUS_AUTH_ID:
+        for key in ("username", "password", "campus_password", "account"):
+            new.pop(key, None)
     store.save(new)
     return {"ok": True}
 
 
 @api_router.post("/plugins/{plugin_id}/start")
-def start_plugin(plugin_id: str):
+def start_plugin(plugin_id: str, body: dict | None = None):
     try:
         plugin = pm.get_plugin(plugin_id)
     except PluginError as e:
@@ -343,7 +437,24 @@ def start_plugin(plugin_id: str):
         for path in _review_paths(plugin_id):
             path.unlink(missing_ok=True)
     cfg = PluginConfigStore(plugin_id).get()
-    effective = _effective_plugin_config(plugin, cfg)
+    requested_account = str((body or {}).get("account_id") or "").strip()
+    if requested_account:
+        if not global_config.resolve_account(requested_account).get("id"):
+            raise HTTPException(404, "所选账号不存在")
+        account_selections.set(plugin_id, requested_account)
+    effective = _effective_plugin_config(
+        plugin, cfg, requested_account or account_selections.get(plugin_id))
+    if not effective.get("username"):
+        raise HTTPException(409, "请先在账号管理中添加并选择账号")
+    if plugin_id == _CAMPUS_AUTH_ID and not effective.get("password"):
+        raise HTTPException(409, "所选账号未配置校园网密码")
+    if plugin_id in {_BDATA_ID, _GRAB_ID} and not effective.get("password"):
+        raise HTTPException(409, "所选账号未配置统一身份认证密码")
+    if plugin_id in {_BDATA_ID, _GRAB_ID}:
+        try:
+            ensure_edge_driver(log=print)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
     data_dir = pm.plugin_data_dir(plugin_id)
     plugin_dir = Path(plugin["dir"]).resolve()
     entry = (plugin_dir / plugin["entry"]).resolve()
@@ -440,7 +551,7 @@ def refresh_bdata_tasks(plugin_id: str):
     cfg = PluginConfigStore(plugin_id).get()
     effective = _effective_plugin_config(plugin, cfg)
     if not effective.get("username") or not effective.get("password"):
-        raise HTTPException(400, "请先填写统一身份认证账号和密码")
+        raise HTTPException(400, "请先在账号管理中配置并选择统一身份认证账号")
     effective["task_mode"] = "crawl"
     for path in _review_paths(plugin_id):
         path.unlink(missing_ok=True)
@@ -524,6 +635,8 @@ def set_campus_autostart(plugin_id: str, body: dict):
         raise HTTPException(422, "enabled 必须是布尔值")
     store = PluginConfigStore(plugin_id)
     config = store.get()
+    for key in ("username", "password", "campus_password", "account"):
+        config.pop(key, None)
     config["autostart"] = enabled
     store.save(config)
     result = _run_campus_autostart(
@@ -617,7 +730,7 @@ def _start_grab_task(task: str, extra: dict) -> None:
     cfg = PluginConfigStore(_GRAB_ID).get()
     effective = _effective_plugin_config(plugin, cfg)
     if not effective.get("username") or not effective.get("password"):
-        raise HTTPException(400, "请先在全局设置中填写统一身份认证账号")
+        raise HTTPException(400, "请先在账号管理中配置并选择统一身份认证账号")
     effective["task"] = task
     effective.update(extra)
     data_dir = pm.plugin_data_dir(_GRAB_ID)
@@ -701,7 +814,12 @@ def get_global():
 
 @api_router.put("/global")
 async def update_global(body: dict):
-    patch = _restore_masked_secrets(_config_patch(body), global_config.get())
+    patch = _config_patch(body)
+    current = global_config.get()
+    if isinstance(patch.get("accounts"), list):
+        patch["accounts"] = _restore_masked_accounts(
+            patch["accounts"], current.get("accounts", []))
+    patch = _restore_masked_secrets(patch, current)
     global_config.update(patch)
     return {"ok": True}
 
@@ -733,23 +851,28 @@ def _startup_maintenance() -> None:
     _maintenance_started = True
     time.sleep(4)
     settings = global_config.get().get("general", {})
-    app_state = app_updater.check()
-    get_bus().publish({"type": "app_update", **app_state})
-    if (
-        app_state.get("available")
-        and settings.get("auto_app_update", True)
-        and _is_packaged_runtime()
-    ):
-        try:
-            app_updater.download_and_launch()
-            _schedule_update_exit()
-            return
-        except Exception as exc:
-            get_bus().publish({
-                "type": "app_update",
-                **app_updater.snapshot(),
-                "message": f"自动更新失败: {exc}",
-            })
+    from .core.paths import start_log_maintenance
+
+    start_log_maintenance()
+    main_mode = settings.get("main_update_mode", "silent")
+    if main_mode != "never":
+        app_state = app_updater.check()
+        get_bus().publish({"type": "app_update", **app_state})
+        if (
+            app_state.get("available")
+            and main_mode == "silent"
+            and _is_packaged_runtime()
+        ):
+            try:
+                app_updater.download_and_launch()
+                _schedule_update_exit()
+                return
+            except Exception as exc:
+                get_bus().publish({
+                    "type": "app_update",
+                    **app_updater.snapshot(),
+                    "message": f"自动更新失败: {exc}",
+                })
     if settings.get("plugin_update_mode", "auto") != "auto":
         return
     try:

@@ -8,6 +8,12 @@
   "theme_color": "#0b1830",
   "icons": [
     {
+      "src": "/assets/bnu-toolbox.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
       "src": "/assets/bnu-toolbox-32.png",
       "sizes": "32x32",
       "type": "image/png"

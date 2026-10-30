@@ -6,13 +6,16 @@ import os
 import subprocess
 import tempfile
 import threading
+import uuid
 from getpass import getuser
 from pathlib import Path
 from typing import Any
 
 from .paths import DATA_DIR
 
-_SECRET_KEYS = {"password", "secret", "token", "api_key"}
+_SECRET_KEYS = {
+    "password", "campus_password", "secret", "token", "api_key",
+}
 _FERNET_PREFIX = "fernet:"
 _FERNET_KEY_NAME = ".credentials.key"
 _RETIRED_SECRET_PREFIX = "dpapi:"
@@ -229,13 +232,14 @@ def _deep_update(base: dict, patch: dict) -> None:
 
 
 GLOBAL_DEFAULTS: dict = {
-    "account": {"username": "", "password": ""},
+    "accounts": [],
     "general": {
         "headless_default": True,
         "default_speedup": 3.0,
         "cookie_life_days": 7,
         "plugin_update_mode": "auto",
-        "auto_app_update": True,
+        "main_update_mode": "silent",
+        "edge_driver_update_mode": "exact",
     },
 }
 
@@ -248,12 +252,43 @@ class GlobalConfig:
 
     def get(self) -> dict:
         data = self.store.load()
-        if not isinstance(data.get("account"), dict):
-            data["account"] = {}
-        if not isinstance(data.get("general"), dict):
-            data["general"] = {}
+        raw_accounts = data.get("accounts")
+        accounts_present = isinstance(raw_accounts, list)
+        accounts = raw_accounts if accounts_present else []
+        if not accounts_present:
+            accounts = []
+        legacy = data.get("account")
+        if not accounts_present and isinstance(legacy, dict) and legacy.get("username"):
+            accounts = [{
+                "id": uuid.uuid4().hex,
+                "username": str(legacy.get("username") or ""),
+                "password": str(legacy.get("password") or ""),
+                "campus_password": str(legacy.get("campus_password") or ""),
+                "nickname": str(legacy.get("nickname") or ""),
+            }]
+            self.store.update({"accounts": accounts})
+        data["accounts"] = [
+            self._normalize_account(item) for item in accounts
+            if isinstance(item, dict)
+        ]
+        raw_general = data.get("general")
+        if not isinstance(raw_general, dict):
+            raw_general = {}
+            data["general"] = raw_general
         merged = json.loads(json.dumps(GLOBAL_DEFAULTS))
         _deep_update(merged, data)
+        general = merged["general"]
+        if "main_update_mode" not in raw_general:
+            general["main_update_mode"] = (
+                "silent" if raw_general.get(
+                    "auto_app_update", True) else "never"
+            )
+        # Keep a read-only compatibility view for plugins built against 0.1.0.
+        first = merged["accounts"][0] if merged["accounts"] else {}
+        merged["account"] = {
+            "username": first.get("username", ""),
+            "password": first.get("password", ""),
+        }
         return merged
 
     def update(self, patch: dict) -> dict:
@@ -261,6 +296,46 @@ class GlobalConfig:
 
     def get_masked(self) -> dict:
         return mask_secrets(self.get())
+
+    @staticmethod
+    def _normalize_account(account: dict) -> dict:
+        account_id = str(account.get("id") or uuid.uuid4().hex)
+        return {
+            "id": account_id,
+            "username": str(account.get("username") or "").strip(),
+            "password": str(account.get("password") or ""),
+            "campus_password": str(account.get("campus_password") or ""),
+            "nickname": str(account.get("nickname") or "").strip(),
+        }
+
+    def resolve_account(self, account_id: str = "") -> dict:
+        accounts = self.get().get("accounts", [])
+        if account_id:
+            for account in accounts:
+                if account.get("id") == account_id:
+                    return account
+        return accounts[0] if accounts else {}
+
+
+class AccountSelectionStore:
+    """Store the account selected for each plugin independently of plugin config."""
+
+    def __init__(self, store: JsonStore | None = None):
+        self.store = store or JsonStore(DATA_DIR / "plugin-accounts.json")
+
+    def get(self, plugin_id: str) -> str:
+        plugins = self.store.load().get("plugins")
+        if not isinstance(plugins, dict):
+            return ""
+        return str(plugins.get(plugin_id) or "")
+
+    def set(self, plugin_id: str, account_id: str) -> None:
+        current = self.store.load()
+        plugins = current.get("plugins")
+        if not isinstance(plugins, dict):
+            plugins = {}
+        plugins[plugin_id] = account_id
+        self.store.update({"plugins": plugins})
 
 
 class PluginConfigStore:

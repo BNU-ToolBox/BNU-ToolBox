@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "BNU-ToolBox"
@@ -26,6 +27,7 @@ RUNTIME_DIR = DATA_DIR / "runtime"
 PLUGIN_DATA_DIR = DATA_DIR / "plugins"
 INSTALLED_PLUGINS_DIR = DATA_DIR / "installed-plugins"
 UPDATE_DIR = DATA_DIR / "updates"
+LOG_TOTAL_LIMIT = 1_000_000
 
 
 def ensure_data_dirs() -> None:
@@ -39,6 +41,48 @@ def ensure_data_dirs() -> None:
         UPDATE_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+
+def trim_logs(max_total_bytes: int = LOG_TOTAL_LIMIT) -> int:
+    """Keep the complete log directory near 1 MB, deleting oldest files first."""
+    if not LOG_DIR.is_dir():
+        return 0
+    files = sorted(
+        (path for path in LOG_DIR.rglob("*") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+    )
+    total = sum(path.stat().st_size for path in files)
+    removed = 0
+    for path in files:
+        if total <= max_total_bytes:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            total -= size
+            removed += size
+        except OSError:
+            # The active console log cannot be removed while open. Rotating
+            # plugin handlers and the next startup cleanup bound its growth.
+            continue
+    return removed
+
+
+def start_log_maintenance() -> None:
+    """Clean oversized log storage at startup and periodically thereafter."""
+    import threading
+
+    def worker() -> None:
+        while True:
+            try:
+                trim_logs()
+            except OSError:
+                pass
+            time.sleep(60)
+
+    threading.Thread(
+        target=worker, daemon=True, name="log-maintenance",
+    ).start()
 
 
 def require_supported_platform() -> None:

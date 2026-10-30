@@ -24,10 +24,10 @@ BNU刷课和校园网认证；也可继续使用 zip 包安装其他插件。
 安装程序会请求管理员权限，默认安装到 `C:\Program Files\BNU-ToolBox`，并创建开始菜单
 和桌面快捷方式。首次启动后：
 
-1. 在“全局设置”中填写北师大统一身份认证账号。
+1. 在“账号管理”中添加北师大统一身份认证账号；需要校园网认证时同时填写校园网密码。
 2. 打开“插件管理”，从在线目录安装所需插件。
-3. 在校园网认证插件中填写独立的校园网账号和认证地址。
-4. 打开目标插件的“配置”页完成设置，再启动任务。
+3. 打开目标插件，在配置页完成设置，并在启动按钮旁选择该插件使用的账号。
+4. 点击右上角“启动”，程序会自动切换到“运行”页。
 5. 在“运行”页查看任务流程、总进度、剩余时间和并行进程状态。
 
 系统必须已安装 Microsoft Edge。应用会自动读取 Edge 版本，并从微软官方服务下载匹配
@@ -44,8 +44,9 @@ BNU刷课和校园网认证；也可继续使用 zip 包安装其他插件。
 
 ## 自动更新
 
-主程序启动后会检查 GitHub Release。启用主程序自动更新时，程序会下载最新安装包、
-校验 SHA-256，并在 Windows 管理员授权后静默安装和重新启动。
+主程序、EdgeDriver 和插件分别提供更新策略。主程序默认为自动静默更新；也可以选择
+“确认后更新”或“从不自动更新”。EdgeDriver 默认在版本号不相等时更新，并自动删除
+旧驱动缓存。
 
 插件更新策略可在“全局设置”中选择：
 
@@ -68,7 +69,7 @@ BNU刷课和校园网认证；也可继续使用 zip 包安装其他插件。
 该目录包含：
 
 ```text
-global.json
+accounts、插件选择与全局设置：global.json、plugin-accounts.json
 .credentials.key
 logs\
 plugins\
@@ -77,7 +78,8 @@ updates\
 runtime\msedgedriver\
 ```
 
-凭据使用 Fernet 加密，密钥通过 Windows 文件权限限制为当前用户访问。
+凭据使用 Fernet 加密，密钥通过 Windows 文件权限限制为当前用户访问。日志目录总占用
+超过 1 MB 时，程序会优先清理最旧文件。可在“全局设置”中直接打开日志文件夹。
 
 ## 卸载
 
@@ -112,7 +114,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 产物：
 
 ```text
-dist\installer\BNU-ToolBox-Setup-0.1.0.exe
+dist\installer\BNU-ToolBox-Setup-0.1.1.exe
 ```
 
 ## 项目结构

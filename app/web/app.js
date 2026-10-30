@@ -32,7 +32,7 @@
   // ---------------- 状态 ----------------
 
   const state = reactive({
-    page: "dashboard",            // dashboard | plugins | settings | detail
+    page: "dashboard",            // dashboard | plugins | accounts | settings | detail
     detailId: null,
     plugins: [],
     catalog: [],
@@ -41,7 +41,9 @@
     catalogStale: false,
     catalogUpdatedAt: "",
     pluginAction: "",
+    pluginDownload: {},           // pluginId -> {percent, downloaded, total}
     promptedPluginUpdates: false,
+    promptedAppUpdate: false,
     globalConfig: null,
     appUpdate: null,
     wsConnected: false,
@@ -58,7 +60,7 @@
     savingGlobal: false,
     installing: false,
     uiHtml: null,                 // 自定义配置界面 HTML(插件 config_ui 提供)
-    detailTab: "run",             // run | config
+    detailTab: "config",          // config | run
   });
 
   // ---------------- WebSocket ----------------
@@ -135,6 +137,12 @@
     } else if (msg.type === "plugin_installed" || msg.type === "plugin_uninstalled") {
       loadPlugins();
       if (state.page === "plugins") loadCatalog(false);
+    } else if (msg.type === "plugin_download") {
+      state.pluginDownload[pid] = {
+        percent: msg.percent,
+        downloaded: msg.downloaded,
+        total: msg.total,
+      };
     } else if (msg.type === "plugin_catalog_updated") {
       loadPlugins();
       loadCatalog(true);
@@ -144,8 +152,31 @@
       }
     } else if (msg.type === "app_update") {
       state.appUpdate = Object.assign({}, state.appUpdate || {}, msg);
+      promptAppUpdateIfNeeded();
     } else if (msg.type === "plugin_catalog_error") {
       state.catalogError = msg.message || "插件目录更新失败";
+    }
+  }
+
+  async function promptAppUpdateIfNeeded() {
+    const info = state.appUpdate || {};
+    const mode = state.globalConfig
+      && state.globalConfig.general
+      && state.globalConfig.general.main_update_mode;
+    if (mode !== "confirm" || !info.available || state.promptedAppUpdate) return;
+    state.promptedAppUpdate = true;
+    try {
+      await El.ElMessageBox.confirm(
+        "发现主程序新版本 " + info.latest_version + "。是否下载并安装？",
+        "主程序更新",
+        { type: "info", confirmButtonText: "下载并安装", cancelButtonText: "稍后" }
+      );
+      await api("/system/app-update/install", { method: "POST" });
+      El.ElMessage.info("安装程序已启动，应用即将重启");
+    } catch (e) {
+      if (e && e.message && !String(e.message).includes("cancel")) {
+        El.ElMessage.error(e.message);
+      }
     }
   }
 
@@ -216,6 +247,7 @@
       state.appUpdate = check
         ? await api("/system/app-update/check", { method: "POST" })
         : await api("/system/app-update");
+      promptAppUpdateIfNeeded();
     } catch (e) {
       state.appUpdate = {
         status: "error",
@@ -238,7 +270,7 @@
     const requestId = ++detailRequest;
     state.detailId = id;
     state.page = "detail";
-    state.detailTab = "run";
+    state.detailTab = p.running ? "run" : "config";
     state.detailSchema = p.config_schema || [];
     state.detailConfig = null;
     state.uiHtml = null;
@@ -335,6 +367,7 @@
         await loadCatalog(false);
         await loadAppUpdate(false);
         await loadEdgeStatus();
+        await promptMissingDriver();
         await loadResources();
       });
 
@@ -352,6 +385,44 @@
         if (!p.latest || !p.update_available) return installed;
         return installed + " → v" + p.latest.version;
       };
+
+      function accountList() {
+        return (state.globalConfig && state.globalConfig.accounts) || [];
+      }
+
+      function accountLabel(account) {
+        if (!account) return "";
+        return (account.nickname || "").trim() || account.username || "未命名账号";
+      }
+
+      function selectedAccountId(pid) {
+        const plugin = state.plugins.find((item) => item.id === pid);
+        const selected = plugin && plugin.selected_account_id;
+        if (selected && accountList().some((item) => item.id === selected)) {
+          return selected;
+        }
+        return accountList().length ? accountList()[0].id : "";
+      }
+
+      async function changePluginAccount(pid, accountId) {
+        if (accountId === "__add__") {
+          state.page = "accounts";
+          return;
+        }
+        try {
+          await api("/plugins/" + pid + "/account", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ account_id: accountId }),
+          });
+          const plugin = state.plugins.find((item) => item.id === pid);
+          if (plugin) plugin.selected_account_id = accountId;
+          El.ElMessage.success("已切换插件账号");
+        } catch (e) {
+          El.ElMessage.error(e.message);
+          await loadPlugins();
+        }
+      }
 
       async function refresh() {
         await loadPlugins();
@@ -380,6 +451,20 @@
         }
       }
 
+      async function promptMissingDriver() {
+        if (!state.edgeStatus || state.edgeStatus.driver_version) return;
+        try {
+          await El.ElMessageBox.confirm(
+            "尚未检测到 Microsoft EdgeDriver。程序可以按当前 Edge 版本自动下载并安装驱动，是否现在下载？",
+            "需要下载 EdgeDriver",
+            { type: "info", confirmButtonText: "自动下载", cancelButtonText: "稍后" }
+          );
+        } catch (e) {
+          return;
+        }
+        await updateEdgeDriver();
+      }
+
       async function updateEdgeDriver() {
         state.edgeUpdating = true;
         try {
@@ -394,6 +479,62 @@
         } finally {
           state.edgeUpdating = false;
         }
+      }
+
+      async function checkEdgeDriver() {
+        state.edgeUpdating = true;
+        try {
+          const result = await api("/system/edge/check", { method: "POST" });
+          state.edgeStatus = result.status;
+          El.ElMessage.success(
+            result.updated ? "EdgeDriver 已更新" : "EdgeDriver 无需更新");
+        } catch (e) {
+          El.ElMessage.error("检查 EdgeDriver 失败: " + e.message);
+          await loadEdgeStatus();
+        } finally {
+          state.edgeUpdating = false;
+        }
+      }
+
+      async function openLogsFolder() {
+        try {
+          await post("/system/open-logs");
+        } catch (e) {
+          El.ElMessage.error(e.message);
+        }
+      }
+
+      function addAccount() {
+        if (!state.globalConfig) return;
+        if (!Array.isArray(state.globalConfig.accounts)) {
+          state.globalConfig.accounts = [];
+        }
+        const id = window.crypto && crypto.randomUUID
+          ? crypto.randomUUID().replace(/-/g, "")
+          : String(Date.now()) + Math.random().toString(16).slice(2);
+        state.globalConfig.accounts.push({
+          id,
+          username: "",
+          password: "",
+          campus_password: "",
+          nickname: "",
+        });
+      }
+
+      async function removeAccount(account) {
+        try {
+          await El.ElMessageBox.confirm(
+            "确定删除账号「" + accountLabel(account) + "」吗？",
+            "删除账号",
+            { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+          );
+        } catch (e) {
+          return;
+        }
+        state.globalConfig.accounts = accountList().filter(
+          (item) => item.id !== account.id);
+        await saveGlobal();
+        await loadPlugins();
       }
 
       async function startPlugin(id) {
@@ -434,9 +575,15 @@
           delete state.progress[id];
           delete state.stoppingPlugins[id];
           state.lastStatus[id] = "正在启动…";
-          await post("/plugins/" + id + "/start");
+          const accountId = selectedAccountId(id);
+          await post("/plugins/" + id + "/start", {
+            account_id: accountId || undefined,
+          });
           El.ElMessage.success("已启动");
           await refresh();
+          if (state.page === "detail" && state.detailId === id) {
+            state.detailTab = "run";
+          }
         } catch (e) {
           state.lastStatus[id] = "启动失败";
           El.ElMessage.error(e.message);
@@ -511,6 +658,7 @@
           );
         } catch (e) { return; }
         state.pluginAction = p.id;
+        delete state.pluginDownload[p.id];
         try {
           const result = await post(
             "/plugins/catalog/" + encodeURIComponent(p.id) + "/install",
@@ -524,6 +672,7 @@
           El.ElMessage.error(e.message);
         } finally {
           state.pluginAction = "";
+          delete state.pluginDownload[p.id];
         }
       }
 
@@ -556,6 +705,7 @@
           }
         }
         state.pluginAction = "";
+        for (const p of updates) delete state.pluginDownload[p.id];
         await loadPlugins();
         await loadCatalog(true);
         if (failed) El.ElMessage.warning(failed + " 个插件更新失败");
@@ -931,7 +1081,9 @@
         installCatalogPlugin, updateAllPlugins, checkAppUpdate, installAppUpdate,
         pluginVersionLabel,
         addCourseRow, removeCourseRow, setThemeMode, refresh,
-        loadEdgeStatus, updateEdgeDriver, Icons,
+        loadEdgeStatus, updateEdgeDriver, checkEdgeDriver, openLogsFolder,
+        accountLabel, selectedAccountId, changePluginAccount,
+        addAccount, removeAccount, Icons,
       };
     },
 
@@ -951,6 +1103,9 @@
       </div>
       <div class="nav-item" :class="{active: state.page==='plugins'}" @click="state.page='plugins'">
         <el-icon><box /></el-icon> 插件管理
+      </div>
+      <div class="nav-item" :class="{active: state.page==='accounts'}" @click="state.page='accounts'">
+        <el-icon><user /></el-icon> 账号管理
       </div>
       <div class="nav-item" :class="{active: state.page==='settings'}" @click="state.page='settings'">
         <el-icon><setting /></el-icon> 全局设置
@@ -1058,6 +1213,20 @@
                 <el-tag v-if="scope.row.update_available" size="small" type="warning" effect="plain">可更新</el-tag>
               </div>
               <div class="form-hint">{{ scope.row.description }}</div>
+              <div
+                class="plugin-download"
+                v-if="state.pluginDownload[scope.row.id]">
+                <span>
+                  正在下载
+                  {{ state.pluginDownload[scope.row.id].percent !== null
+                    ? state.pluginDownload[scope.row.id].percent + "%" : "…" }}
+                </span>
+                <el-progress
+                  :percentage="state.pluginDownload[scope.row.id].percent || 0"
+                  :indeterminate="state.pluginDownload[scope.row.id].percent === null"
+                  :show-text="false"
+                  :stroke-width="6" />
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="版本" width="120">
@@ -1103,49 +1272,65 @@
       </div>
     </template>
 
+    <!-- 账号管理 -->
+    <template v-if="state.page==='accounts' && state.globalConfig">
+      <div class="page-header">
+        <h1>账号管理</h1>
+        <p>统一保存北师大身份账号；每个插件可以独立选择使用哪个账号。</p>
+      </div>
+      <div class="account-list">
+        <div
+          class="panel account-card"
+          v-for="(account, index) in (state.globalConfig.accounts || [])"
+          :key="account.id">
+          <div class="account-card-head">
+            <strong>{{ accountLabel(account) }}</strong>
+            <el-button type="danger" plain size="small" @click="removeAccount(account)">
+              删除
+            </el-button>
+          </div>
+          <el-form label-width="110px" style="max-width:620px">
+            <el-form-item label="学号">
+              <el-input v-model="account.username" placeholder="统一身份认证学号" />
+            </el-form-item>
+            <el-form-item label="密码">
+              <el-input v-model="account.password" type="password" show-password
+                placeholder="统一身份认证密码（已加密存储）" />
+            </el-form-item>
+            <el-form-item label="校园网密码">
+              <el-input v-model="account.campus_password" type="password" show-password
+                placeholder="可留空（已加密存储）" />
+            </el-form-item>
+            <el-form-item label="昵称">
+              <el-input v-model="account.nickname" placeholder="留空时显示学号" />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+      <div v-if="!(state.globalConfig.accounts || []).length" class="panel empty-state">
+        尚未添加账号。添加后即可为各插件选择使用。
+      </div>
+      <div class="account-actions">
+        <el-button @click="addAccount">
+          <el-icon style="margin-right:4px"><plus /></el-icon>添加账号
+        </el-button>
+        <el-button type="primary" :loading="state.savingGlobal" @click="saveGlobal">
+          保存账号
+        </el-button>
+      </div>
+    </template>
+
     <!-- 全局设置 -->
     <template v-if="state.page==='settings' && state.globalConfig">
       <div class="page-header">
         <h1>全局设置</h1>
-        <p>北师大统一身份认证账号；BNU刷课固定使用这里的凭据同时登录师道云和 SPOC。凭据使用 Fernet 加密存储。</p>
-      </div>
-      <div class="panel">
-        <h2><el-icon><user /></el-icon> 统一身份认证账号</h2>
-        <el-form label-width="90px" style="max-width:560px">
-          <el-form-item label="学号">
-            <el-input v-model="state.globalConfig.account.username" placeholder="请输入北师大统一身份认证学号" />
-          </el-form-item>
-          <el-form-item label="密码">
-            <el-input v-model="state.globalConfig.account.password" type="password" show-password placeholder="已加密存储" />
-          </el-form-item>
-        </el-form>
+        <p>配置默认参数、更新策略和日志位置。账号请前往“账号管理”。</p>
       </div>
       <div class="panel">
         <h2><el-icon><tools /></el-icon> 通用参数</h2>
         <el-form label-width="160px" style="max-width:620px">
           <el-form-item label="运行平台">
             <span>Windows 11 · Microsoft Edge</span>
-          </el-form-item>
-          <el-form-item label="Edge 版本">
-            <span v-if="state.edgeStatus && state.edgeStatus.edge_version">
-              {{ state.edgeStatus.edge_version }}
-            </span>
-            <span v-else class="form-hint">未检测到 Microsoft Edge</span>
-          </el-form-item>
-          <el-form-item label="EdgeDriver">
-            <span v-if="state.edgeStatus && state.edgeStatus.driver_version">
-              {{ state.edgeStatus.driver_version }}
-              <el-tag v-if="state.edgeStatus.compatible" type="success" size="small">兼容</el-tag>
-            </span>
-            <span v-else class="form-hint">尚未下载</span>
-            <el-button
-              style="margin-left:12px"
-              size="small"
-              :loading="state.edgeUpdating"
-              @click="updateEdgeDriver">
-              检测并更新驱动
-            </el-button>
-            <div class="form-hint">插件启动时也会自动检测 Edge 版本并下载匹配的 EdgeDriver。</div>
           </el-form-item>
           <el-form-item label="默认无头模式">
             <el-switch v-model="state.globalConfig.general.headless_default" />
@@ -1166,57 +1351,70 @@
           <el-form-item label="默认播放倍速">
             <el-input-number v-model="state.globalConfig.general.default_speedup" :min="1" :max="16" :step="0.5" />
           </el-form-item>
-          <el-form-item label="插件更新策略">
-            <el-select v-model="state.globalConfig.general.plugin_update_mode" style="width:280px">
-              <el-option value="auto" label="自动更新" />
-              <el-option value="confirm" label="确认后更新" />
-              <el-option value="never" label="从不自动更新" />
-            </el-select>
+          <el-form-item label="运行日志">
+            <el-button size="small" @click="openLogsFolder">
+              <el-icon style="margin-right:4px"><folder-opened /></el-icon>打开日志文件夹
+            </el-button>
             <div class="form-hint">
-              自动更新会在启动后检查已安装插件；确认后更新会在打开插件管理页时询问。
+              日志超过 1 MB 时自动清理最旧文件；运行日志不会占用安装目录。
             </div>
           </el-form-item>
         </el-form>
       </div>
       <div class="panel">
-        <h2><el-icon><refresh /></el-icon> 主程序更新</h2>
-        <div class="update-summary">
-          <div>
-            <div class="update-version">
-              当前版本 v{{ (state.appUpdate && state.appUpdate.current_version) || "—" }}
-            </div>
-            <div class="form-hint">
-              {{ (state.appUpdate && state.appUpdate.message) || "尚未检查更新" }}
-            </div>
-          </div>
-          <div class="update-actions">
-            <el-button
-              size="small"
-              :loading="state.pluginAction==='app-update-check'"
+        <h2><el-icon><refresh /></el-icon> 更新设置</h2>
+        <el-form label-width="170px" class="update-settings-form">
+          <el-form-item label="插件更新策略">
+            <el-select v-model="state.globalConfig.general.plugin_update_mode" style="width:260px">
+              <el-option value="auto" label="自动更新" />
+              <el-option value="confirm" label="确认后更新" />
+              <el-option value="never" label="从不自动更新" />
+            </el-select>
+            <el-button size="small" :loading="state.catalogLoading"
+              @click="loadCatalog(true)">检查更新</el-button>
+          </el-form-item>
+          <el-form-item label="主程序更新策略">
+            <el-select v-model="state.globalConfig.general.main_update_mode" style="width:260px">
+              <el-option value="silent" label="自动静默更新" />
+              <el-option value="confirm" label="确认后更新" />
+              <el-option value="never" label="从不自动更新" />
+            </el-select>
+            <el-button size="small" :loading="state.pluginAction==='app-update-check'"
               @click="checkAppUpdate">检查更新</el-button>
+            <span class="update-current">
+              当前 v{{ (state.appUpdate && state.appUpdate.current_version) || "—" }}
+            </span>
             <el-button
               v-if="state.appUpdate && state.appUpdate.available"
               size="small"
               type="primary"
               :loading="state.pluginAction==='app-update-install'"
-              @click="installAppUpdate">下载并安装 v{{ state.appUpdate.latest_version }}</el-button>
-          </div>
-        </div>
-        <el-form label-width="190px" style="max-width:720px;margin-top:14px">
-          <el-form-item label="自动安装主程序更新">
-            <el-switch v-model="state.globalConfig.general.auto_app_update" />
-            <div class="form-hint">
-              启动后自动检查、下载并校验 GitHub Release；安装时 Windows 可能显示管理员授权提示。
-            </div>
+              @click="installAppUpdate">安装 v{{ state.appUpdate.latest_version }}</el-button>
+          </el-form-item>
+          <el-form-item label="EdgeDriver 更新策略">
+            <el-select v-model="state.globalConfig.general.edge_driver_update_mode" style="width:260px">
+              <el-option value="exact" label="版本不匹配时更新" />
+              <el-option value="compatible" label="版本不兼容时更新" />
+              <el-option value="prompt" label="不兼容时提示更新" />
+            </el-select>
+            <el-button size="small" :loading="state.edgeUpdating"
+              @click="checkEdgeDriver">检查更新</el-button>
+            <span class="update-current">
+              Edge {{ (state.edgeStatus && state.edgeStatus.edge_version) || "未检测到" }}
+              · Driver {{ (state.edgeStatus && state.edgeStatus.driver_version) || "未下载" }}
+            </span>
           </el-form-item>
         </el-form>
+        <div class="form-hint update-message">
+          {{ (state.appUpdate && state.appUpdate.message) || "尚未检查主程序更新" }}
+        </div>
       </div>
       <el-button type="primary" size="large" :loading="state.savingGlobal" @click="saveGlobal">保存全部设置</el-button>
     </template>
 
     <!-- 插件详情 -->
     <template v-if="state.page==='detail' && detailPlugin">
-      <div class="page-header" style="display:flex;align-items:center;gap:14px">
+      <div class="page-header detail-header">
         <el-button circle aria-label="返回仪表盘" @click="state.page='dashboard'">
           <el-icon><back /></el-icon>
         </el-button>
@@ -1224,7 +1422,20 @@
           <h1>{{ detailPlugin.name }} <el-tag size="small" effect="plain">v{{ detailPlugin.version }}</el-tag></h1>
           <p>{{ detailPlugin.description }}</p>
         </div>
-        <div style="margin-left:auto;display:flex;gap:8px">
+        <div class="detail-actions">
+          <el-select
+            :model-value="selectedAccountId(detailPlugin.id)"
+            style="width:180px"
+            placeholder="选择账号"
+            :disabled="detailPlugin.running"
+            @change="(id) => changePluginAccount(detailPlugin.id, id)">
+            <el-option
+              v-for="account in (state.globalConfig && state.globalConfig.accounts) || []"
+              :key="account.id"
+              :value="account.id"
+              :label="accountLabel(account)" />
+            <el-option value="__add__" label="＋ 添加账户" />
+          </el-select>
           <el-button v-if="!detailPlugin.running" type="primary" @click="startPlugin(detailPlugin.id)">
             <el-icon style="margin-right:4px"><video-play /></el-icon>启动
           </el-button>
@@ -1238,15 +1449,15 @@
         <button
           type="button"
           role="tab"
-          :aria-selected="state.detailTab==='run'"
-          :class="{active: state.detailTab==='run'}"
-          @click="state.detailTab='run'">运行</button>
-        <button
-          type="button"
-          role="tab"
           :aria-selected="state.detailTab==='config'"
           :class="{active: state.detailTab==='config'}"
           @click="state.detailTab='config'">配置</button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="state.detailTab==='run'"
+          :class="{active: state.detailTab==='run'}"
+          @click="state.detailTab='run'">运行</button>
       </div>
 
       <div v-show="state.detailTab==='run'" role="tabpanel">
